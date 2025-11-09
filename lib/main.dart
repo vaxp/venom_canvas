@@ -6,8 +6,50 @@ import 'package:desktop_drop/desktop_drop.dart';
 import 'package:path/path.dart' as p;
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
-import 'package:file_picker/file_picker.dart'; // إضافة هامة
+import 'package:file_picker/file_picker.dart';
+import 'package:crypto/crypto.dart';
 
+// ====== Thumbnail Manager ======
+class ThumbnailManager {
+  static final Directory _cacheDir =
+      Directory('${Platform.environment["HOME"]}/.cache/thumbnails/normal');
+
+  static String _hashPath(String filePath) {
+    return md5.convert(utf8.encode(filePath)).toString();
+  }
+
+  static File _thumbFile(String filePath) {
+    return File(p.join(_cacheDir.path, "${_hashPath(filePath)}.png"));
+  }
+
+  static Future<File?> getOrCreateThumbnail(String filePath) async {
+    await _cacheDir.create(recursive: true);
+    final thumbFile = _thumbFile(filePath);
+
+    if (thumbFile.existsSync()) return thumbFile;
+
+    final ext = p.extension(filePath).toLowerCase();
+    List<String> cmd;
+
+    if ([".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"].contains(ext)) {
+      cmd = ["gdk-pixbuf-thumbnailer", "-s", "256", filePath, thumbFile.path];
+    } else if ([".mp4", ".mkv", ".avi", ".mov", ".webm"].contains(ext)) {
+      cmd = ["ffmpegthumbnailer", "-i", filePath, "-o", thumbFile.path, "-s", "256"];
+    } else {
+      return null;
+    }
+
+    try {
+      final result = await Process.run(cmd.first, cmd.skip(1).toList());
+      if (result.exitCode == 0 && thumbFile.existsSync()) return thumbFile;
+    } catch (e) {
+      stderr.writeln("Thumbnail error for $filePath: $e");
+    }
+    return null;
+  }
+}
+
+// ====== Main App ======
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized();
@@ -50,14 +92,14 @@ class _DesktopPageState extends State<DesktopPage> {
   bool _isDraggingExternal = false;
   String wallpaperPath = '';
   late File layoutFile;
-  late File configFile; // ملف جديد لحفظ الإعدادات العامة
+  late File configFile;
 
   @override
   void initState() {
     super.initState();
     _initPaths();
-    _loadConfig(); // تحميل الإعدادات (الخلفية)
-    _loadLayout(); // تحميل مواقع الأيقونات
+    _loadConfig();
+    _loadLayout();
     _setupFileWatcher();
     _refreshEntries();
   }
@@ -75,26 +117,17 @@ class _DesktopPageState extends State<DesktopPage> {
     configDirPath = p.join(home, '.config', 'venom');
     final configDir = Directory(configDirPath);
     if (!configDir.existsSync()) configDir.createSync(recursive: true);
-
-    // المسارات الافتراضية لملفات التكوين
     layoutFile = File(p.join(configDirPath, 'desktop_layout.json'));
     configFile = File(p.join(configDirPath, 'venom.json'));
-
-    // خلفية افتراضية أولية
     wallpaperPath = p.join(configDirPath, 'wallpaper.jpg');
-
-    if (!desktopDir.existsSync()) {
-      desktopDir.createSync(recursive: true);
-    }
+    if (!desktopDir.existsSync()) desktopDir.createSync(recursive: true);
   }
 
-  // --- Config Persistence: حفظ واسترجاع الإعدادات العامة ---
   void _loadConfig() {
     try {
       if (configFile.existsSync()) {
         final data = jsonDecode(configFile.readAsStringSync());
         setState(() {
-          // استرجاع مسار الخلفية المحفوظ، أو البقاء على الافتراضي
           wallpaperPath = data['wallpaper'] ?? wallpaperPath;
         });
       }
@@ -105,17 +138,13 @@ class _DesktopPageState extends State<DesktopPage> {
 
   void _saveConfig() {
     try {
-      final data = {
-        'wallpaper': wallpaperPath,
-        // يمكن إضافة المزيد من الإعدادات هنا مستقبلاً
-      };
+      final data = {'wallpaper': wallpaperPath};
       configFile.writeAsStringSync(jsonEncode(data));
     } catch (e) {
       debugPrint("Config save error: $e");
     }
   }
 
-  // --- Layout Persistence ---
   void _loadLayout() {
     try {
       if (layoutFile.existsSync()) {
@@ -141,7 +170,6 @@ class _DesktopPageState extends State<DesktopPage> {
     }
   }
 
-  // --- File Watching & Refresh ---
   void _setupFileWatcher() {
     _watchSub = desktopDir.watch().listen((_) => _debouncedRefresh());
   }
@@ -163,7 +191,6 @@ class _DesktopPageState extends State<DesktopPage> {
     } catch (_) {}
   }
 
-  // --- Launch Logic ---
   Future<void> _launchEntity(FileSystemEntity entity) async {
     final path = entity.path;
     if (path.endsWith('.desktop')) {
@@ -203,14 +230,11 @@ class _DesktopPageState extends State<DesktopPage> {
         return Icons.description_rounded;
       case '.zip': case '.tar': case '.gz': case '.7z': case '.rar':
         return Icons.folder_zip_rounded;
-      case '.iso':
-        return Icons.album_rounded;
       default:
         return Icons.insert_drive_file_rounded;
     }
   }
 
-  // --- UI Building ---
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -225,21 +249,17 @@ class _DesktopPageState extends State<DesktopPage> {
           child: Stack(
             fit: StackFit.expand,
             children: [
-              // Layer 1: Smart Wallpaper
               _buildSmartWallpaper(),
-
-              // Layer 2: Icons
               ...entries.asMap().entries.map((entry) {
                 return _buildFreeDraggableIcon(entry.value, entry.key);
               }),
-
-              // Layer 3: Drag Overlay
               if (_isDraggingExternal)
                 Container(
                   color: Colors.teal.withOpacity(0.15),
                   child: Center(
-                      child: Icon(Icons.add_to_photos_rounded,
-                          size: 80, color: Colors.white.withOpacity(0.5))),
+                    child: Icon(Icons.add_to_photos_rounded,
+                        size: 80, color: Colors.white.withOpacity(0.5)),
+                  ),
                 ),
             ],
           ),
@@ -251,10 +271,8 @@ class _DesktopPageState extends State<DesktopPage> {
   Widget _buildSmartWallpaper() {
     final file = File(wallpaperPath);
     if (!file.existsSync()) return _buildFallbackBackground();
-
     final ext = p.extension(wallpaperPath).toLowerCase();
     const videoExtensions = ['.mp4', '.mkv', '.avi', '.mov', '.webm'];
-
     if (videoExtensions.contains(ext)) {
       return VideoWallpaper(videoPath: wallpaperPath, key: ValueKey(wallpaperPath));
     } else {
@@ -303,18 +321,39 @@ class _DesktopPageState extends State<DesktopPage> {
           padding: const EdgeInsets.all(8),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(8),
-            color: Colors.transparent, 
+            color: Colors.transparent,
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(
-                _getIconForFile(entity.path),
-                size: 48,
-                color: Colors.white.withOpacity(0.95),
-                shadows: const [
-                  BoxShadow(blurRadius: 4, color: Colors.black54, offset: Offset(0, 2))
-                ],
+              FutureBuilder<File?>(
+                future: ThumbnailManager.getOrCreateThumbnail(entity.path),
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState != ConnectionState.done) {
+                    return Icon(
+                      _getIconForFile(entity.path),
+                      size: 48,
+                      color: Colors.white.withOpacity(0.95),
+                    );
+                  }
+                  final thumb = snapshot.data;
+                  if (thumb != null && thumb.existsSync()) {
+                    return ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: Image.file(
+                        thumb,
+                        width: 64,
+                        height: 64,
+                        fit: BoxFit.cover,
+                      ),
+                    );
+                  }
+                  return Icon(
+                    _getIconForFile(entity.path),
+                    size: 48,
+                    color: Colors.white.withOpacity(0.95),
+                  );
+                },
               ),
               const SizedBox(height: 6),
               Container(
@@ -371,12 +410,11 @@ class _DesktopPageState extends State<DesktopPage> {
     _debouncedRefresh();
   }
 
-  // --- Context Menu & Wallpaper Picker ---
   void _showContextMenu(Offset position) async {
     final result = await showMenu<String>(
       context: context,
-      position: RelativeRect.fromLTRB(
-          position.dx, position.dy, position.dx, position.dy),
+      position:
+          RelativeRect.fromLTRB(position.dx, position.dy, position.dx, position.dy),
       color: const Color(0xFF2A2A2A),
       items: [
         const PopupMenuItem(value: 'refresh', child: Text('Refresh', style: TextStyle(color: Colors.white))),
@@ -387,7 +425,7 @@ class _DesktopPageState extends State<DesktopPage> {
     );
 
     if (result == 'refresh') _refreshEntries();
-    if (result == 'wallpaper') _pickWallpaper(); // استخدام منتقي الملفات الجديد
+    if (result == 'wallpaper') _pickWallpaper();
     if (result == 'terminal') {
       Process.run('exo-open', [
         '--launch',
@@ -398,29 +436,25 @@ class _DesktopPageState extends State<DesktopPage> {
     }
   }
 
-  // دالة اختيار الخلفية الجديدة باستخدام FilePicker
   Future<void> _pickWallpaper() async {
     try {
       FilePickerResult? result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
-        // دعم الصور والفيديوهات معاً
         allowedExtensions: ['jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4', 'mkv', 'avi', 'mov', 'webm'],
       );
-
       if (result != null && result.files.single.path != null) {
         setState(() {
           wallpaperPath = result.files.single.path!;
         });
-        _saveConfig(); // حفظ الاختيار الجديد
+        _saveConfig();
       }
     } catch (e) {
       debugPrint("Error picking wallpaper: $e");
-      // يمكن إضافة SnackBar هنا لإظهار خطأ للمستخدم إذا لزم الأمر
     }
   }
 }
 
-// --- Video Wallpaper Widget (Reusable) ---
+// ====== Video Wallpaper ======
 class VideoWallpaper extends StatefulWidget {
   final String videoPath;
   const VideoWallpaper({super.key, required this.videoPath});
@@ -447,7 +481,7 @@ class _VideoWallpaperState extends State<VideoWallpaper> {
     super.dispose();
   }
 
- @override
+  @override
   Widget build(BuildContext context) {
     return SizedBox.expand(
       child: FittedBox(
@@ -455,11 +489,10 @@ class _VideoWallpaperState extends State<VideoWallpaper> {
         child: SizedBox(
           width: MediaQuery.of(context).size.width,
           height: MediaQuery.of(context).size.height,
-          // هنا التعديل: نضيف controls: NoVideoControls
           child: Video(
             controller: controller,
             fit: BoxFit.cover,
-            controls: NoVideoControls, // <--- هذا السطر السحري يخفي كل شيء
+            controls: NoVideoControls,
           ),
         ),
       ),
