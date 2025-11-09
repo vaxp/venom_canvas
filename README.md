@@ -401,4 +401,4 @@ class _DesktopPageState extends State<DesktopPage> {
 
 
 
-مكتبه مهمه لنضام   apt install libmpv-dev# venom_canvas
+مكتبه مهمه لنضام   apt install libmpv-dev
