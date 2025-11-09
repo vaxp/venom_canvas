@@ -1,18 +1,34 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/painting.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:path/path.dart' as p;
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+import 'src/presentation/bloc/desktop_manager_bloc.dart';
+import 'src/data/desktop_repository_impl.dart';
 import 'package:video_thumbnail/video_thumbnail.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized();
-  runApp(const VenomDesktopApp());
+
+  // إعدادات صارمة لكاش الصور لتقليل استهلاك الرام
+  PaintingBinding.instance.imageCache.maximumSizeBytes = 1024 * 1024 * 5; // 50 MB
+  PaintingBinding.instance.imageCache.maximumSize = 5;
+
+  runApp(
+    RepositoryProvider<DesktopRepositoryImpl>(
+      create: (_) => DesktopRepositoryImpl(),
+      child: BlocProvider(
+        create: (ctx) => DesktopManagerBloc(repository: ctx.read<DesktopRepositoryImpl>())..add(LoadDesktopEvent()),
+        child: const VenomDesktopApp(),
+      ),
+    ),
+  );
 }
 
 class VenomDesktopApp extends StatelessWidget {
@@ -34,132 +50,69 @@ class VenomDesktopApp extends StatelessWidget {
   }
 }
 
-class DesktopPage extends StatefulWidget {
+class DesktopPage extends StatelessWidget {
   const DesktopPage({super.key});
 
   @override
-  State<DesktopPage> createState() => _DesktopPageState();
+  Widget build(BuildContext context) {
+    return BlocBuilder<DesktopManagerBloc, DesktopManagerState>(
+      builder: (context, state) {
+        if (state is DesktopLoaded) {
+          return DesktopView(entries: state.entries, wallpaperPath: state.wallpaperPath, positions: state.positions);
+        } else if (state is DesktopLoading || state is DesktopInitial) {
+          return const Scaffold(
+            backgroundColor: Colors.transparent,
+            body: Center(child: CircularProgressIndicator()),
+          );
+        } else if (state is DesktopError) {
+          return Scaffold(
+            backgroundColor: Colors.transparent,
+            body: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('Error: ${state.message}'),
+                  const SizedBox(height: 8),
+                  ElevatedButton(
+                    onPressed: () => context.read<DesktopManagerBloc>().add(LoadDesktopEvent()),
+                    child: const Text('Retry'),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }
+        return const SizedBox.shrink();
+      },
+    );
+  }
 }
 
-class _DesktopPageState extends State<DesktopPage> {
-  late final Directory desktopDir;
-  late final String configDirPath;
-  List<FileSystemEntity> entries = [];
-  Map<String, Offset> iconPositions = {};
-  // كاش للثمنيلات لتقليل إعادة التحميل
+class DesktopView extends StatefulWidget {
+  final List<String> entries;
+  final String wallpaperPath;
+  final Map<String, Map<String, double>> positions;
+
+  const DesktopView({super.key, required this.entries, required this.wallpaperPath, required this.positions});
+
+  @override
+  State<DesktopView> createState() => _DesktopViewState();
+}
+
+class _DesktopViewState extends State<DesktopView> {
   final Map<String, ImageProvider> thumbnailsCache = {};
   final Map<String, Future<void>> _loadingTasks = {};
-  StreamSubscription? _watchSub;
-  Timer? _debounceTimer;
   bool _isDraggingExternal = false;
-  String wallpaperPath = '';
-  late File layoutFile;
-  late File configFile;
+  Key wallpaperKey = UniqueKey();
 
   @override
-  void initState() {
-    super.initState();
-    _initPaths();
-    _loadConfig();
-    _loadLayout();
-    _setupFileWatcher();
-    _refreshEntries();
-  }
-
-  @override
-  void dispose() {
-    _watchSub?.cancel();
-    _debounceTimer?.cancel();
-    super.dispose();
-  }
-
-  void _initPaths() {
-    final home = Platform.environment['HOME'] ?? Directory.current.path;
-    desktopDir = Directory(p.join(home, 'Desktop'));
-    configDirPath = p.join(home, '.config', 'venom');
-    final configDir = Directory(configDirPath);
-    if (!configDir.existsSync()) configDir.createSync(recursive: true);
-    layoutFile = File(p.join(configDirPath, 'desktop_layout.json'));
-    configFile = File(p.join(configDirPath, 'venom.json'));
-    wallpaperPath = p.join(configDirPath, 'wallpaper.jpg');
-    if (!desktopDir.existsSync()) desktopDir.createSync(recursive: true);
-  }
-
-  void _loadConfig() {
-    try {
-      if (configFile.existsSync()) {
-        final data = jsonDecode(configFile.readAsStringSync());
-        wallpaperPath = data['wallpaper'] ?? wallpaperPath;
-      }
-    } catch (_) {}
-  }
-
-  void _saveConfig() {
-    try {
-      configFile.writeAsStringSync(jsonEncode({'wallpaper': wallpaperPath}));
-    } catch (_) {}
-  }
-
-  void _loadLayout() {
-    try {
-      if (layoutFile.existsSync()) {
-        final json = jsonDecode(layoutFile.readAsStringSync());
-        iconPositions = (json as Map<String, dynamic>).map((k, v) =>
-            MapEntry(k, Offset((v['x'] as num).toDouble(), (v['y'] as num).toDouble())));
-      }
-    } catch (_) {}
-  }
-
-  void _saveLayout() {
-    try {
-      layoutFile.writeAsStringSync(jsonEncode(
-          iconPositions.map((k, v) => MapEntry(k, {'x': v.dx, 'y': v.dy}))));
-    } catch (_) {}
-  }
-
-  void _setupFileWatcher() {
-    _watchSub = desktopDir.watch().listen((_) => _debouncedRefresh());
-  }
-
-  void _debouncedRefresh() {
-    _debounceTimer?.cancel();
-    _debounceTimer = Timer(const Duration(milliseconds: 300), _refreshEntries);
-  }
-
-  void _refreshEntries() {
-    if (!mounted) return;
-    try {
-      final currentFiles = desktopDir.listSync().toList();
-      // تنظيف الكاش من الملفات المحذوفة لتوفير الرام
-      final currentNames = currentFiles.map((e) => p.basename(e.path)).toSet();
-      thumbnailsCache.removeWhere((key, _) => !currentNames.contains(key));
-      iconPositions.removeWhere((key, _) => !currentNames.contains(key));
-
-      setState(() {
-        entries = currentFiles;
-      });
-    } catch (_) {}
-  }
-
-  Future<void> _launchEntity(FileSystemEntity entity) async {
-    final path = entity.path;
-    if (path.endsWith('.desktop')) {
-      await _launchDesktopFile(File(path));
-    } else {
-      await Process.start('xdg-open', [path], mode: ProcessStartMode.detached);
+  void didUpdateWidget(covariant DesktopView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.wallpaperPath != widget.wallpaperPath) {
+      // force rebuild of wallpaper widget to clear previous image cache
+      PaintingBinding.instance.imageCache.clear();
+      setState(() => wallpaperKey = UniqueKey());
     }
-  }
-
-  Future<void> _launchDesktopFile(File file) async {
-    try {
-      final content = await file.readAsString();
-      final execMatch = RegExp(r'^Exec=(.*)$', multiLine: true).firstMatch(content);
-      if (execMatch != null) {
-        String cmd = execMatch.group(1)!.trim();
-        cmd = cmd.replaceAll(RegExp(r' %[fFuUicwk]'), '');
-        await Process.start('sh', ['-c', cmd], mode: ProcessStartMode.detached);
-      }
-    } catch (_) {}
   }
 
   IconData _getIconForFile(String path) {
@@ -175,6 +128,8 @@ class _DesktopPageState extends State<DesktopPage> {
         return Icons.audiotrack_rounded;
       case '.pdf':
         return Icons.picture_as_pdf_rounded;
+      case '.txt': case '.md': case '.log': case '.cfg':
+        return Icons.description_rounded;
       case '.zip': case '.tar': case '.gz': case '.7z': case '.rar':
         return Icons.folder_zip_rounded;
       case '.iso':
@@ -184,10 +139,8 @@ class _DesktopPageState extends State<DesktopPage> {
     }
   }
 
-  // --- تحسين تحميل الثمنيل ---
   Future<void> _loadThumbnail(String path, String filename) async {
     if (thumbnailsCache.containsKey(filename) || _loadingTasks.containsKey(filename)) return;
-
     _loadingTasks[filename] = _generateThumbnail(path, filename).whenComplete(() {
       _loadingTasks.remove(filename);
     });
@@ -199,165 +152,24 @@ class _DesktopPageState extends State<DesktopPage> {
 
     try {
       if (['.jpg', '.jpeg', '.png', '.gif', '.webp'].contains(ext)) {
-        // أهم تحسين: ResizeImage لتقليل استهلاك الرام
-        provider = ResizeImage(FileImage(File(path)), width: 128);
+        provider = ResizeImage(FileImage(File(path)), width: 128, policy: ResizeImagePolicy.fit);
       } else if (['.mp4', '.mkv', '.avi', '.mov', '.webm'].contains(ext)) {
         final thumbPath = await VideoThumbnail.thumbnailFile(
           video: path,
-          imageFormat: ImageFormat.PNG,
-          maxWidth: 128, // تقليل جودة الثمنيل لتوفير الرام
+          imageFormat: ImageFormat.JPEG,
+          maxWidth: 128,
           quality: 50,
         );
         if (thumbPath != null) {
-          provider = FileImage(File(thumbPath));
+          provider = ResizeImage(FileImage(File(thumbPath)), width: 128);
         }
       }
-      
       if (provider != null && mounted) {
         setState(() {
           thumbnailsCache[filename] = provider!;
         });
       }
     } catch (_) {}
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.transparent,
-      body: DropTarget(
-        onDragEntered: (_) => setState(() => _isDraggingExternal = true),
-        onDragExited: (_) => setState(() => _isDraggingExternal = false),
-        onDragDone: _handleExternalDrop,
-        child: GestureDetector(
-          onSecondaryTapUp: (d) => _showContextMenu(d.globalPosition),
-          behavior: HitTestBehavior.translucent,
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              _buildSmartWallpaper(),
-              // استخدام for loop بدلاً من map لتقليل overhead
-              for (int i = 0; i < entries.length; i++)
-                _buildFreeDraggableIcon(entries[i], i),
-              if (_isDraggingExternal)
-                Container(
-                  color: Colors.teal.withOpacity(0.15),
-                  child: const Center(
-                    child: Icon(Icons.add_to_photos_rounded,
-                        size: 80, color: Colors.white54),
-                  ),
-                ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildSmartWallpaper() {
-    final file = File(wallpaperPath);
-    if (!file.existsSync()) return _buildFallbackBackground();
-
-    final ext = p.extension(wallpaperPath).toLowerCase();
-    const vids = ['.mp4', '.mkv', '.avi', '.mov', '.webm'];
-
-    if (vids.contains(ext)) {
-      // استخدام Key لضمان عدم إعادة بناء مشغل الفيديو إلا عند تغير المسار
-      return VideoWallpaper(videoPath: wallpaperPath, key: ValueKey(wallpaperPath));
-    }
-    return Image.file(
-      file,
-      fit: BoxFit.cover,
-      gaplessPlayback: true,
-      errorBuilder: (_, __, ___) => _buildFallbackBackground(),
-    );
-  }
-
-  Widget _buildFallbackBackground() => Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            colors: [Color(0xFF0F2027), Color(0xFF203A43), Color(0xFF2C5364)],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ),
-        ),
-      );
-
-  Widget _buildFreeDraggableIcon(FileSystemEntity entity, int index) {
-    final filename = p.basename(entity.path);
-    final position = iconPositions[filename] ?? _getDefaultPosition(index);
-    final displayName = filename.endsWith('.desktop')
-        ? filename.replaceAll('.desktop', '')
-        : filename;
-
-    // بدء تحميل الثمنيل إذا لم يكن موجوداً
-    _loadThumbnail(entity.path, filename);
-
-    return Positioned(
-      left: position.dx,
-      top: position.dy,
-      child: GestureDetector(
-        onPanUpdate: (details) {
-          setState(() {
-            iconPositions[filename] =
-                (iconPositions[filename] ?? position) + details.delta;
-          });
-        },
-        onPanEnd: (_) => _saveLayout(),
-        onDoubleTap: () => _launchEntity(entity),
-        child: Container(
-          width: 90,
-          padding: const EdgeInsets.all(8),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(8),
-            color: Colors.transparent, // لتحسين الأداء، تجنب الألوان غير الضرورية
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // استخدام AnimatedSwitcher لتنعيم ظهور الثمنيل
-              AnimatedSwitcher(
-                duration: const Duration(milliseconds: 300),
-                child: thumbnailsCache.containsKey(filename)
-                    ? ClipRRect(
-                        borderRadius: BorderRadius.circular(8),
-                        child: Image(
-                          key: ValueKey('thumb-$filename'),
-                          image: thumbnailsCache[filename]!,
-                          width: 64,
-                          height: 64,
-                          fit: BoxFit.cover,
-                          gaplessPlayback: true,
-                        ),
-                      )
-                    : Icon(
-                        _getIconForFile(entity.path),
-                        key: ValueKey('icon-$filename'),
-                        size: 48,
-                        color: Colors.white.withOpacity(0.9),
-                      ),
-              ),
-              const SizedBox(height: 6),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-                decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(0.25),
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                child: Text(
-                  displayName,
-                  textAlign: TextAlign.center,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                      color: Colors.white, fontSize: 12, height: 1.1),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
   }
 
   Offset _getDefaultPosition(int index) {
@@ -368,79 +180,140 @@ class _DesktopPageState extends State<DesktopPage> {
     return Offset(startX + (col * iconWidth), startY + (row * iconHeight));
   }
 
-  Future<void> _handleExternalDrop(DropDoneDetails details) async {
-    setState(() => _isDraggingExternal = false);
-    Offset dropPos = details.localPosition ?? const Offset(100, 100);
-    for (int i = 0; i < details.files.length; i++) {
-      final file = details.files[i];
-      final destPath = p.join(desktopDir.path, p.basename(file.path));
-      if (file.path == destPath) continue;
-      try {
-        await File(file.path).rename(destPath);
-        iconPositions[p.basename(destPath)] =
-            dropPos + Offset(i * 20.0, i * 20.0);
-      } catch (_) {
-        try {
-          await File(file.path).copy(destPath);
-        } catch (_) {}
-      }
+  Widget _buildSmartWallpaper() {
+    final file = File(widget.wallpaperPath);
+    if (!file.existsSync()) return Container(color: const Color(0xFF203A43));
+
+    final ext = p.extension(widget.wallpaperPath).toLowerCase();
+    const vids = ['.mp4', '.mkv', '.avi', '.mov', '.webm'];
+
+    if (vids.contains(ext)) {
+      return VideoWallpaper(videoPath: widget.wallpaperPath);
     }
-    _saveLayout();
-    _debouncedRefresh();
+    return Image.file(
+      file,
+      fit: BoxFit.cover,
+      gaplessPlayback: true,
+      errorBuilder: (_, __, ___) => Container(color: const Color(0xFF203A43)),
+    );
   }
 
-  void _showContextMenu(Offset position) async {
-    final result = await showMenu<String>(
-      context: context,
-      position: RelativeRect.fromLTRB(
-          position.dx, position.dy, position.dx, position.dy),
-      color: const Color(0xFF2A2A2A),
-      items: [
-        const PopupMenuItem(
-            value: 'refresh',
-            child: Text('Refresh', style: TextStyle(color: Colors.white))),
-        const PopupMenuItem(
-            value: 'wallpaper',
-            child: Text('Change Wallpaper...',
-                style: TextStyle(color: Colors.white))),
-        const PopupMenuDivider(),
-        const PopupMenuItem(
-            value: 'terminal',
-            child: Text('Open Terminal Here',
-                style: TextStyle(color: Colors.white))),
-      ],
-    );
+  @override
+  Widget build(BuildContext context) {
+    final entries = widget.entries;
+    final positions = widget.positions;
 
-    if (result == 'refresh') _refreshEntries();
-    if (result == 'wallpaper') _pickWallpaper();
-    if (result == 'terminal') {
-      Process.run('exo-open', [
-        '--launch',
-        'TerminalEmulator',
-        '--working-directory',
-        desktopDir.path
-      ]);
-    }
+    return Scaffold(
+      backgroundColor: Colors.transparent,
+      body: DropTarget(
+        onDragEntered: (_) => setState(() => _isDraggingExternal = true),
+        onDragExited: (_) => setState(() => _isDraggingExternal = false),
+        onDragDone: (details) {
+          setState(() => _isDraggingExternal = false);
+          final paths = details.files.map((f) => f.path).toList();
+          final drop = details.localPosition;
+          context.read<DesktopManagerBloc>().add(DropFilesEvent(paths: paths, dropX: drop.dx, dropY: drop.dy));
+        },
+        child: GestureDetector(
+          onSecondaryTapUp: (d) async {
+            final result = await showMenu<String>(
+              context: context,
+              position: RelativeRect.fromLTRB(d.globalPosition.dx, d.globalPosition.dy, d.globalPosition.dx, d.globalPosition.dy),
+              color: const Color(0xFF2A2A2A),
+              items: [
+                const PopupMenuItem(value: 'refresh', child: Text('Refresh', style: TextStyle(color: Colors.white))),
+                const PopupMenuItem(value: 'wallpaper', child: Text('Change Wallpaper...', style: TextStyle(color: Colors.white))),
+                const PopupMenuDivider(),
+                const PopupMenuItem(value: 'terminal', child: Text('Open Terminal Here', style: TextStyle(color: Colors.white))),
+              ],
+            );
+
+            if (result == 'refresh') context.read<DesktopManagerBloc>().add(RefreshDesktopEvent());
+            if (result == 'wallpaper') _pickWallpaper();
+            if (result == 'terminal') {
+              final base = entries.isNotEmpty ? p.dirname(entries.first) : p.join(Platform.environment['HOME'] ?? '.', 'Desktop');
+              Process.run('exo-open', ['--launch', 'TerminalEmulator', '--working-directory', base]);
+            }
+          },
+          behavior: HitTestBehavior.translucent,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              KeyedSubtree(key: wallpaperKey, child: _buildSmartWallpaper()),
+              for (int i = 0; i < entries.length; i++)
+                _buildFreeDraggableIcon(entries[i], i, positions),
+              if (_isDraggingExternal)
+                Container(
+                  color: Colors.teal.withOpacity(0.15),
+                  child: const Center(child: Icon(Icons.add_to_photos_rounded, size: 80, color: Colors.white54)),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFreeDraggableIcon(String path, int index, Map<String, Map<String, double>> positions) {
+    final filename = p.basename(path);
+    final posMap = positions[filename];
+    final position = posMap != null ? Offset(posMap['x']!, posMap['y']!) : _getDefaultPosition(index);
+    final displayName = filename.endsWith('.desktop') ? filename.replaceAll('.desktop', '') : filename;
+
+    _loadThumbnail(path, filename);
+
+    return Positioned(
+      left: position.dx,
+      top: position.dy,
+      child: GestureDetector(
+        onPanUpdate: (details) {
+          final newPos = Offset(position.dx + details.delta.dx, position.dy + details.delta.dy);
+          context.read<DesktopManagerBloc>().add(UpdatePositionEvent(filename: filename, x: newPos.dx, y: newPos.dy));
+        },
+        onDoubleTap: () => context.read<DesktopManagerBloc>().add(LaunchEntityEvent(path)),
+        child: Container(
+          width: 90,
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(borderRadius: BorderRadius.circular(8), color: Colors.transparent),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              AnimatedSwitcher(
+                duration: const Duration(milliseconds: 300),
+                child: thumbnailsCache.containsKey(filename)
+                    ? Image(key: ValueKey('thumb-$filename'), image: thumbnailsCache[filename]!, width: 48, height: 48, fit: BoxFit.cover, gaplessPlayback: true)
+                    : Icon(_getIconForFile(path), key: ValueKey('icon-$filename'), size: 48, color: Colors.white.withOpacity(0.9)),
+              ),
+              const SizedBox(height: 6),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                decoration: BoxDecoration(color: Colors.black.withOpacity(0.25), borderRadius: BorderRadius.circular(4)),
+                child: Text(displayName, textAlign: TextAlign.center, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 12, height: 1.1)),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Future<void> _pickWallpaper() async {
     try {
       FilePickerResult? result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
-        allowedExtensions: [
-          'jpg', 'jpeg', 'png', 'gif', 'webp',
-          'mp4', 'mkv', 'avi', 'mov', 'webm'
-        ],
+        allowedExtensions: ['jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4', 'mkv', 'avi', 'mov', 'webm'],
       );
+
       if (result != null && result.files.single.path != null) {
-        setState(() => wallpaperPath = result.files.single.path!);
-        _saveConfig();
+        PaintingBinding.instance.imageCache.clear();
+        final path = result.files.single.path!;
+        context.read<DesktopManagerBloc>().add(SetWallpaperEvent(path));
       }
     } catch (_) {}
   }
 }
 
-// --- Video Wallpaper Widget (Optimized) ---
+// --- Video Wallpaper Widget (Nuclear Disposal) ---
 class VideoWallpaper extends StatefulWidget {
   final String videoPath;
   const VideoWallpaper({super.key, required this.videoPath});
@@ -450,34 +323,74 @@ class VideoWallpaper extends StatefulWidget {
 }
 
 class _VideoWallpaperState extends State<VideoWallpaper> {
-  late final Player player = Player();
-  late final VideoController controller = VideoController(player);
+  Player? player;
+  VideoController? controller;
+  StreamSubscription<bool>? _completedSubscription;
+  bool isRestarting = false;
 
   @override
   void initState() {
     super.initState();
-    player.setPlaylistMode(PlaylistMode.loop);
-    player.setVolume(0);
-    player.open(Media(widget.videoPath));
+    _initPlayer();
+  }
+
+  Future<void> _initPlayer() async {
+    if (!mounted) return;
+    player = Player(
+        configuration: const PlayerConfiguration(
+            bufferSize: 1024 * 512, // بافر صغير جداً (0.5 ميجا)
+        ));
+    controller = VideoController(player!);
+    
+    player!.setVolume(0);
+    player!.setPlaylistMode(PlaylistMode.none);
+
+    await player!.open(Media(widget.videoPath, extras: {
+      'mpv': {'cache': 'no', 'demuxer-max-bytes': '128KiB'}
+    }));
+
+    _completedSubscription = player!.stream.completed.listen((bool isCompleted) {
+      if (isCompleted && mounted && !isRestarting) {
+        _nukeAndRestart();
+      }
+    });
+
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _nukeAndRestart() async {
+    isRestarting = true;
+    await player?.dispose();
+    player = null;
+    controller = null;
+    if (mounted) setState(() {});
+    await Future.delayed(const Duration(milliseconds: 50));
+    if (mounted) {
+      await _initPlayer();
+      isRestarting = false;
+    }
   }
 
   @override
   void dispose() {
-    player.dispose();
+    _completedSubscription?.cancel();
+    player?.stop();
+    player?.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    if (player == null || controller == null) return const SizedBox();
     return SizedBox.expand(
       child: FittedBox(
         fit: BoxFit.cover,
-        // استخدام const هنا يمنع إعادة بناء ويدجت الفيديو بلا داعٍ
         child: SizedBox(
           width: MediaQuery.of(context).size.width,
           height: MediaQuery.of(context).size.height,
           child: Video(
-            controller: controller,
+            
+            controller: controller!,
             fit: BoxFit.cover,
             controls: NoVideoControls,
           ),
