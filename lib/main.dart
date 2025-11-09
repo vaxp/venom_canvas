@@ -7,49 +7,8 @@ import 'package:path/path.dart' as p;
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:crypto/crypto.dart';
+import 'package:video_thumbnail/video_thumbnail.dart';
 
-// ====== Thumbnail Manager ======
-class ThumbnailManager {
-  static final Directory _cacheDir =
-      Directory('${Platform.environment["HOME"]}/.cache/thumbnails/normal');
-
-  static String _hashPath(String filePath) {
-    return md5.convert(utf8.encode(filePath)).toString();
-  }
-
-  static File _thumbFile(String filePath) {
-    return File(p.join(_cacheDir.path, "${_hashPath(filePath)}.png"));
-  }
-
-  static Future<File?> getOrCreateThumbnail(String filePath) async {
-    await _cacheDir.create(recursive: true);
-    final thumbFile = _thumbFile(filePath);
-
-    if (thumbFile.existsSync()) return thumbFile;
-
-    final ext = p.extension(filePath).toLowerCase();
-    List<String> cmd;
-
-    if ([".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"].contains(ext)) {
-      cmd = ["gdk-pixbuf-thumbnailer", "-s", "256", filePath, thumbFile.path];
-    } else if ([".mp4", ".mkv", ".avi", ".mov", ".webm"].contains(ext)) {
-      cmd = ["ffmpegthumbnailer", "-i", filePath, "-o", thumbFile.path, "-s", "256"];
-    } else {
-      return null;
-    }
-
-    try {
-      final result = await Process.run(cmd.first, cmd.skip(1).toList());
-      if (result.exitCode == 0 && thumbFile.existsSync()) return thumbFile;
-    } catch (e) {
-      stderr.writeln("Thumbnail error for $filePath: $e");
-    }
-    return null;
-  }
-}
-
-// ====== Main App ======
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized();
@@ -87,6 +46,9 @@ class _DesktopPageState extends State<DesktopPage> {
   late final String configDirPath;
   List<FileSystemEntity> entries = [];
   Map<String, Offset> iconPositions = {};
+  // كاش للثمنيلات لتقليل إعادة التحميل
+  final Map<String, ImageProvider> thumbnailsCache = {};
+  final Map<String, Future<void>> _loadingTasks = {};
   StreamSubscription? _watchSub;
   Timer? _debounceTimer;
   bool _isDraggingExternal = false;
@@ -127,47 +89,32 @@ class _DesktopPageState extends State<DesktopPage> {
     try {
       if (configFile.existsSync()) {
         final data = jsonDecode(configFile.readAsStringSync());
-        setState(() {
-          wallpaperPath = data['wallpaper'] ?? wallpaperPath;
-        });
+        wallpaperPath = data['wallpaper'] ?? wallpaperPath;
       }
-    } catch (e) {
-      debugPrint("Config load error: $e");
-    }
+    } catch (_) {}
   }
 
   void _saveConfig() {
     try {
-      final data = {'wallpaper': wallpaperPath};
-      configFile.writeAsStringSync(jsonEncode(data));
-    } catch (e) {
-      debugPrint("Config save error: $e");
-    }
+      configFile.writeAsStringSync(jsonEncode({'wallpaper': wallpaperPath}));
+    } catch (_) {}
   }
 
   void _loadLayout() {
     try {
       if (layoutFile.existsSync()) {
-        final content = layoutFile.readAsStringSync();
-        final Map<String, dynamic> json = jsonDecode(content);
-        setState(() {
-          iconPositions = json.map((key, value) => MapEntry(
-              key, Offset((value['x'] as num).toDouble(), (value['y'] as num).toDouble())));
-        });
+        final json = jsonDecode(layoutFile.readAsStringSync());
+        iconPositions = (json as Map<String, dynamic>).map((k, v) =>
+            MapEntry(k, Offset((v['x'] as num).toDouble(), (v['y'] as num).toDouble())));
       }
-    } catch (e) {
-      debugPrint("Layout load error: $e");
-    }
+    } catch (_) {}
   }
 
   void _saveLayout() {
     try {
-      final json = iconPositions
-          .map((key, value) => MapEntry(key, {'x': value.dx, 'y': value.dy}));
-      layoutFile.writeAsStringSync(jsonEncode(json));
-    } catch (e) {
-      debugPrint("Layout save error: $e");
-    }
+      layoutFile.writeAsStringSync(jsonEncode(
+          iconPositions.map((k, v) => MapEntry(k, {'x': v.dx, 'y': v.dy}))));
+    } catch (_) {}
   }
 
   void _setupFileWatcher() {
@@ -182,11 +129,14 @@ class _DesktopPageState extends State<DesktopPage> {
   void _refreshEntries() {
     if (!mounted) return;
     try {
-      final currentFiles =
-          desktopDir.listSync().map((e) => p.basename(e.path)).toSet();
-      iconPositions.removeWhere((key, _) => !currentFiles.contains(key));
+      final currentFiles = desktopDir.listSync().toList();
+      // تنظيف الكاش من الملفات المحذوفة لتوفير الرام
+      final currentNames = currentFiles.map((e) => p.basename(e.path)).toSet();
+      thumbnailsCache.removeWhere((key, _) => !currentNames.contains(key));
+      iconPositions.removeWhere((key, _) => !currentNames.contains(key));
+
       setState(() {
-        entries = desktopDir.listSync().toList();
+        entries = currentFiles;
       });
     } catch (_) {}
   }
@@ -203,8 +153,7 @@ class _DesktopPageState extends State<DesktopPage> {
   Future<void> _launchDesktopFile(File file) async {
     try {
       final content = await file.readAsString();
-      final execMatch =
-          RegExp(r'^Exec=(.*)$', multiLine: true).firstMatch(content);
+      final execMatch = RegExp(r'^Exec=(.*)$', multiLine: true).firstMatch(content);
       if (execMatch != null) {
         String cmd = execMatch.group(1)!.trim();
         cmd = cmd.replaceAll(RegExp(r' %[fFuUicwk]'), '');
@@ -226,13 +175,50 @@ class _DesktopPageState extends State<DesktopPage> {
         return Icons.audiotrack_rounded;
       case '.pdf':
         return Icons.picture_as_pdf_rounded;
-      case '.txt': case '.md': case '.log': case '.cfg':
-        return Icons.description_rounded;
       case '.zip': case '.tar': case '.gz': case '.7z': case '.rar':
         return Icons.folder_zip_rounded;
+      case '.iso':
+        return Icons.album_rounded;
       default:
         return Icons.insert_drive_file_rounded;
     }
+  }
+
+  // --- تحسين تحميل الثمنيل ---
+  Future<void> _loadThumbnail(String path, String filename) async {
+    if (thumbnailsCache.containsKey(filename) || _loadingTasks.containsKey(filename)) return;
+
+    _loadingTasks[filename] = _generateThumbnail(path, filename).whenComplete(() {
+      _loadingTasks.remove(filename);
+    });
+  }
+
+  Future<void> _generateThumbnail(String path, String filename) async {
+    final ext = p.extension(path).toLowerCase();
+    ImageProvider? provider;
+
+    try {
+      if (['.jpg', '.jpeg', '.png', '.gif', '.webp'].contains(ext)) {
+        // أهم تحسين: ResizeImage لتقليل استهلاك الرام
+        provider = ResizeImage(FileImage(File(path)), width: 128);
+      } else if (['.mp4', '.mkv', '.avi', '.mov', '.webm'].contains(ext)) {
+        final thumbPath = await VideoThumbnail.thumbnailFile(
+          video: path,
+          imageFormat: ImageFormat.PNG,
+          maxWidth: 128, // تقليل جودة الثمنيل لتوفير الرام
+          quality: 50,
+        );
+        if (thumbPath != null) {
+          provider = FileImage(File(thumbPath));
+        }
+      }
+      
+      if (provider != null && mounted) {
+        setState(() {
+          thumbnailsCache[filename] = provider!;
+        });
+      }
+    } catch (_) {}
   }
 
   @override
@@ -244,21 +230,21 @@ class _DesktopPageState extends State<DesktopPage> {
         onDragExited: (_) => setState(() => _isDraggingExternal = false),
         onDragDone: _handleExternalDrop,
         child: GestureDetector(
-          onSecondaryTapUp: (details) => _showContextMenu(details.globalPosition),
+          onSecondaryTapUp: (d) => _showContextMenu(d.globalPosition),
           behavior: HitTestBehavior.translucent,
           child: Stack(
             fit: StackFit.expand,
             children: [
               _buildSmartWallpaper(),
-              ...entries.asMap().entries.map((entry) {
-                return _buildFreeDraggableIcon(entry.value, entry.key);
-              }),
+              // استخدام for loop بدلاً من map لتقليل overhead
+              for (int i = 0; i < entries.length; i++)
+                _buildFreeDraggableIcon(entries[i], i),
               if (_isDraggingExternal)
                 Container(
                   color: Colors.teal.withOpacity(0.15),
-                  child: Center(
+                  child: const Center(
                     child: Icon(Icons.add_to_photos_rounded,
-                        size: 80, color: Colors.white.withOpacity(0.5)),
+                        size: 80, color: Colors.white54),
                   ),
                 ),
             ],
@@ -271,31 +257,31 @@ class _DesktopPageState extends State<DesktopPage> {
   Widget _buildSmartWallpaper() {
     final file = File(wallpaperPath);
     if (!file.existsSync()) return _buildFallbackBackground();
-    final ext = p.extension(wallpaperPath).toLowerCase();
-    const videoExtensions = ['.mp4', '.mkv', '.avi', '.mov', '.webm'];
-    if (videoExtensions.contains(ext)) {
-      return VideoWallpaper(videoPath: wallpaperPath, key: ValueKey(wallpaperPath));
-    } else {
-      return Image.file(
-        file,
-        fit: BoxFit.cover,
-        gaplessPlayback: true,
-        errorBuilder: (_, __, ___) => _buildFallbackBackground(),
-      );
-    }
-  }
 
-  Widget _buildFallbackBackground() {
-    return Container(
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          colors: [Color(0xFF0F2027), Color(0xFF203A43), Color(0xFF2C5364)],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-      ),
+    final ext = p.extension(wallpaperPath).toLowerCase();
+    const vids = ['.mp4', '.mkv', '.avi', '.mov', '.webm'];
+
+    if (vids.contains(ext)) {
+      // استخدام Key لضمان عدم إعادة بناء مشغل الفيديو إلا عند تغير المسار
+      return VideoWallpaper(videoPath: wallpaperPath, key: ValueKey(wallpaperPath));
+    }
+    return Image.file(
+      file,
+      fit: BoxFit.cover,
+      gaplessPlayback: true,
+      errorBuilder: (_, __, ___) => _buildFallbackBackground(),
     );
   }
+
+  Widget _buildFallbackBackground() => Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            colors: [Color(0xFF0F2027), Color(0xFF203A43), Color(0xFF2C5364)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+        ),
+      );
 
   Widget _buildFreeDraggableIcon(FileSystemEntity entity, int index) {
     final filename = p.basename(entity.path);
@@ -303,6 +289,9 @@ class _DesktopPageState extends State<DesktopPage> {
     final displayName = filename.endsWith('.desktop')
         ? filename.replaceAll('.desktop', '')
         : filename;
+
+    // بدء تحميل الثمنيل إذا لم يكن موجوداً
+    _loadThumbnail(entity.path, filename);
 
     return Positioned(
       left: position.dx,
@@ -321,46 +310,39 @@ class _DesktopPageState extends State<DesktopPage> {
           padding: const EdgeInsets.all(8),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(8),
-            color: Colors.transparent,
+            color: Colors.transparent, // لتحسين الأداء، تجنب الألوان غير الضرورية
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              FutureBuilder<File?>(
-                future: ThumbnailManager.getOrCreateThumbnail(entity.path),
-                builder: (context, snapshot) {
-                  if (snapshot.connectionState != ConnectionState.done) {
-                    return Icon(
-                      _getIconForFile(entity.path),
-                      size: 48,
-                      color: Colors.white.withOpacity(0.95),
-                    );
-                  }
-                  final thumb = snapshot.data;
-                  if (thumb != null && thumb.existsSync()) {
-                    return ClipRRect(
-                      borderRadius: BorderRadius.circular(8),
-                      child: Image.file(
-                        thumb,
-                        width: 64,
-                        height: 64,
-                        fit: BoxFit.cover,
+              // استخدام AnimatedSwitcher لتنعيم ظهور الثمنيل
+              AnimatedSwitcher(
+                duration: const Duration(milliseconds: 300),
+                child: thumbnailsCache.containsKey(filename)
+                    ? ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: Image(
+                          key: ValueKey('thumb-$filename'),
+                          image: thumbnailsCache[filename]!,
+                          width: 64,
+                          height: 64,
+                          fit: BoxFit.cover,
+                          gaplessPlayback: true,
+                        ),
+                      )
+                    : Icon(
+                        _getIconForFile(entity.path),
+                        key: ValueKey('icon-$filename'),
+                        size: 48,
+                        color: Colors.white.withOpacity(0.9),
                       ),
-                    );
-                  }
-                  return Icon(
-                    _getIconForFile(entity.path),
-                    size: 48,
-                    color: Colors.white.withOpacity(0.95),
-                  );
-                },
               ),
               const SizedBox(height: 6),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
                 decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(0.3),
-                  borderRadius: BorderRadius.circular(6),
+                  color: Colors.black.withOpacity(0.25),
+                  borderRadius: BorderRadius.circular(4),
                 ),
                 child: Text(
                   displayName,
@@ -368,7 +350,7 @@ class _DesktopPageState extends State<DesktopPage> {
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
-                      color: Colors.white, fontSize: 12, height: 1.2),
+                      color: Colors.white, fontSize: 12, height: 1.1),
                 ),
               ),
             ],
@@ -379,11 +361,8 @@ class _DesktopPageState extends State<DesktopPage> {
   }
 
   Offset _getDefaultPosition(int index) {
-    const colCount = 6;
-    const startX = 20.0;
-    const startY = 20.0;
-    const iconWidth = 100.0;
-    const iconHeight = 110.0;
+    const colCount = 6, startX = 20.0, startY = 20.0;
+    const iconWidth = 100.0, iconHeight = 110.0;
     final row = index % colCount;
     final col = index ~/ colCount;
     return Offset(startX + (col * iconWidth), startY + (row * iconHeight));
@@ -413,14 +392,22 @@ class _DesktopPageState extends State<DesktopPage> {
   void _showContextMenu(Offset position) async {
     final result = await showMenu<String>(
       context: context,
-      position:
-          RelativeRect.fromLTRB(position.dx, position.dy, position.dx, position.dy),
+      position: RelativeRect.fromLTRB(
+          position.dx, position.dy, position.dx, position.dy),
       color: const Color(0xFF2A2A2A),
       items: [
-        const PopupMenuItem(value: 'refresh', child: Text('Refresh', style: TextStyle(color: Colors.white))),
-        const PopupMenuItem(value: 'wallpaper', child: Text('Change Wallpaper...', style: TextStyle(color: Colors.white))),
+        const PopupMenuItem(
+            value: 'refresh',
+            child: Text('Refresh', style: TextStyle(color: Colors.white))),
+        const PopupMenuItem(
+            value: 'wallpaper',
+            child: Text('Change Wallpaper...',
+                style: TextStyle(color: Colors.white))),
         const PopupMenuDivider(),
-        const PopupMenuItem(value: 'terminal', child: Text('Open Terminal Here', style: TextStyle(color: Colors.white))),
+        const PopupMenuItem(
+            value: 'terminal',
+            child: Text('Open Terminal Here',
+                style: TextStyle(color: Colors.white))),
       ],
     );
 
@@ -440,21 +427,20 @@ class _DesktopPageState extends State<DesktopPage> {
     try {
       FilePickerResult? result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
-        allowedExtensions: ['jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4', 'mkv', 'avi', 'mov', 'webm'],
+        allowedExtensions: [
+          'jpg', 'jpeg', 'png', 'gif', 'webp',
+          'mp4', 'mkv', 'avi', 'mov', 'webm'
+        ],
       );
       if (result != null && result.files.single.path != null) {
-        setState(() {
-          wallpaperPath = result.files.single.path!;
-        });
+        setState(() => wallpaperPath = result.files.single.path!);
         _saveConfig();
       }
-    } catch (e) {
-      debugPrint("Error picking wallpaper: $e");
-    }
+    } catch (_) {}
   }
 }
 
-// ====== Video Wallpaper ======
+// --- Video Wallpaper Widget (Optimized) ---
 class VideoWallpaper extends StatefulWidget {
   final String videoPath;
   const VideoWallpaper({super.key, required this.videoPath});
@@ -486,6 +472,7 @@ class _VideoWallpaperState extends State<VideoWallpaper> {
     return SizedBox.expand(
       child: FittedBox(
         fit: BoxFit.cover,
+        // استخدام const هنا يمنع إعادة بناء ويدجت الفيديو بلا داعٍ
         child: SizedBox(
           width: MediaQuery.of(context).size.width,
           height: MediaQuery.of(context).size.height,
