@@ -17,8 +17,8 @@ void main() {
   MediaKit.ensureInitialized();
 
   // إعدادات صارمة لكاش الصور لتقليل استهلاك الرام
-  PaintingBinding.instance.imageCache.maximumSizeBytes = 1024 * 1024 * 5; // 50 MB
-  PaintingBinding.instance.imageCache.maximumSize = 5;
+  PaintingBinding.instance.imageCache.maximumSizeBytes = 1024 * 1024 * 1; // 50 MB
+  PaintingBinding.instance.imageCache.maximumSize = 1;
 
   runApp(
     RepositoryProvider<DesktopRepositoryImpl>(
@@ -322,77 +322,111 @@ class VideoWallpaper extends StatefulWidget {
   State<VideoWallpaper> createState() => _VideoWallpaperState();
 }
 
-class _VideoWallpaperState extends State<VideoWallpaper> {
+class _VideoWallpaperState extends State<VideoWallpaper>
+    with SingleTickerProviderStateMixin {
   Player? player;
   VideoController? controller;
   StreamSubscription<bool>? _completedSubscription;
   bool isRestarting = false;
+  late AnimationController fadeController;
 
   @override
   void initState() {
     super.initState();
+    fadeController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 400),
+    )..value = 1.0;
     _initPlayer();
   }
 
   Future<void> _initPlayer() async {
-    if (!mounted) return;
-    player = Player(
+    try {
+      player = Player(
         configuration: const PlayerConfiguration(
-            bufferSize: 1024 * 512, // بافر صغير جداً (0.5 ميجا)
-        ));
-    controller = VideoController(player!);
-    
-    player!.setVolume(0);
-    player!.setPlaylistMode(PlaylistMode.none);
+          bufferSize: 1024 * 1024, // 1MB buffer for smoother playback
+        ),
+      );
+      controller = VideoController(player!);
 
-    await player!.open(Media(widget.videoPath, extras: {
-      'mpv': {'cache': 'no', 'demuxer-max-bytes': '128KiB'}
-    }));
+      await player!.setVolume(0);
+      await player!.setPlaylistMode(PlaylistMode.none);
 
-    _completedSubscription = player!.stream.completed.listen((bool isCompleted) {
-      if (isCompleted && mounted && !isRestarting) {
-        _nukeAndRestart();
-      }
-    });
+      await player!.open(
+        Media(widget.videoPath),
+        play: true,
+      );
 
-    if (mounted) setState(() {});
+      // restart on completion from 0.5s instead of full reload
+      _completedSubscription =
+          player!.stream.completed.listen((bool isCompleted) async {
+        if (isCompleted && mounted && !isRestarting) {
+          await _restartSmooth();
+        }
+      });
+
+      setState(() {});
+    } catch (e) {
+      debugPrint('VideoWallpaper init error: $e');
+    }
   }
 
-  Future<void> _nukeAndRestart() async {
+  Future<void> _restartSmooth() async {
+    if (player == null || isRestarting) return;
     isRestarting = true;
-    await player?.dispose();
-    player = null;
-    controller = null;
-    if (mounted) setState(() {});
-    await Future.delayed(const Duration(milliseconds: 50));
-    if (mounted) {
-      await _initPlayer();
-      isRestarting = false;
+
+    try {
+      // Smooth fade out then seek then fade in
+      await fadeController.reverse();
+      await player!.pause();
+      await player!.seek(const Duration(milliseconds: 100)); // ثانيتك 0.5
+      await player!.play();
+      await fadeController.forward();
+    } catch (e) {
+      await _hardRestart();
     }
+
+    isRestarting = false;
+  }
+
+  Future<void> _hardRestart() async {
+    try {
+      await player?.dispose();
+      player = null;
+      controller = null;
+      setState(() {});
+      await Future.delayed(const Duration(milliseconds: 100));
+      if (mounted) await _initPlayer();
+    } catch (_) {}
   }
 
   @override
   void dispose() {
     _completedSubscription?.cancel();
-    player?.stop();
     player?.dispose();
+    fadeController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    if (player == null || controller == null) return const SizedBox();
-    return SizedBox.expand(
-      child: FittedBox(
-        fit: BoxFit.cover,
-        child: SizedBox(
-          width: MediaQuery.of(context).size.width,
-          height: MediaQuery.of(context).size.height,
-          child: Video(
-            
-            controller: controller!,
-            fit: BoxFit.cover,
-            controls: NoVideoControls,
+    if (player == null || controller == null) {
+      return const SizedBox.expand();
+    }
+
+    return FadeTransition(
+      opacity: fadeController,
+      child: SizedBox.expand(
+        child: FittedBox(
+          fit: BoxFit.cover,
+          child: SizedBox(
+            width: MediaQuery.of(context).size.width,
+            height: MediaQuery.of(context).size.height,
+            child: Video(
+              controller: controller!,
+              fit: BoxFit.cover,
+              controls: NoVideoControls,
+            ),
           ),
         ),
       ),
