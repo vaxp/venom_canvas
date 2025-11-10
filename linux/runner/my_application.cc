@@ -3,6 +3,8 @@
 #include <flutter_linux/flutter_linux.h>
 #ifdef GDK_WINDOWING_X11
 #include <gdk/gdkx.h>
+#include <X11/Xatom.h>
+#include <X11/Xlib.h>
 #endif
 
 #include "flutter/generated_plugin_registrant.h"
@@ -14,69 +16,119 @@ struct _MyApplication {
 
 G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
 
-// Called when first Flutter frame received.
-static void first_frame_cb(MyApplication* self, FlView *view)
-{
+static void first_frame_cb(MyApplication* self, FlView* view) {
+  // Show the top-level only when first Flutter frame arrives
   gtk_widget_show(gtk_widget_get_toplevel(GTK_WIDGET(view)));
 }
+
+#ifdef GDK_WINDOWING_X11
+static void apply_x11_desktop_hints(GtkWindow* window) {
+  GdkWindow* gdk_window = gtk_widget_get_window(GTK_WIDGET(window));
+  if (!GDK_IS_X11_WINDOW(gdk_window))
+    return;
+
+  Display* display = GDK_DISPLAY_XDISPLAY(gdk_window_get_display(gdk_window));
+  Window x11_window = GDK_WINDOW_XID(gdk_window);
+
+  Atom net_wm_window_type = XInternAtom(display, "_NET_WM_WINDOW_TYPE", False);
+  Atom net_wm_window_type_desktop = XInternAtom(display, "_NET_WM_WINDOW_TYPE_DESKTOP", False);
+  XChangeProperty(display, x11_window, net_wm_window_type, XA_ATOM, 32,
+                  PropModeReplace, (unsigned char*)&net_wm_window_type_desktop, 1);
+
+  Atom net_wm_state = XInternAtom(display, "_NET_WM_STATE", False);
+  Atom below = XInternAtom(display, "_NET_WM_STATE_BELOW", False);
+  Atom sticky = XInternAtom(display, "_NET_WM_STATE_STICKY", False);
+  Atom skip_taskbar = XInternAtom(display, "_NET_WM_STATE_SKIP_TASKBAR", False);
+  Atom skip_pager = XInternAtom(display, "_NET_WM_STATE_SKIP_PAGER", False);
+
+  Atom states[] = { below, sticky, skip_taskbar, skip_pager };
+  XChangeProperty(display, x11_window, net_wm_state, XA_ATOM, 32,
+                  PropModeReplace, (unsigned char*)states, G_N_ELEMENTS(states));
+
+  // Make sure changes are sent
+  XFlush(display);
+}
+#endif
 
 // Implements GApplication::activate.
 static void my_application_activate(GApplication* application) {
   MyApplication* self = MY_APPLICATION(application);
-  GtkWindow* window =
-      GTK_WINDOW(gtk_application_window_new(GTK_APPLICATION(application)));
+  GtkWindow* window = GTK_WINDOW(gtk_application_window_new(GTK_APPLICATION(application)));
 
-  // -------------------------------------------------------------
-  // VENOM DESKTOP NUCLEAR HINTS - START
-  // -------------------------------------------------------------
-  
-  // 1. Tell the window manager this is the DESKTOP layer.
-  gtk_window_set_type_hint(window, GDK_WINDOW_TYPE_HINT_DESKTOP);
-
-  // 2. Remove all decorations (title bar, borders, etc).
+  // Make window properties for desktop
   gtk_window_set_decorated(window, FALSE);
-
-  // 3. Make it visible on ALL workspaces.
-  gtk_window_stick(window);
-
-  // 4. Force it to stay at the bottom of the window stack.
-  gtk_window_set_keep_below(window, TRUE);
-
-  // 5. Hide it from taskbars and pagers (Alt+Tab).
   gtk_window_set_skip_taskbar_hint(window, TRUE);
   gtk_window_set_skip_pager_hint(window, TRUE);
+  gtk_window_set_keep_below(window, TRUE);
+  gtk_window_set_accept_focus(window, FALSE);
 
-  // 6. Make it fullscreen to cover the entire monitor area.
-  gtk_window_fullscreen(window);
+  // Make window app-paintable and request RGBA visual if available
+  gtk_widget_set_app_paintable(GTK_WIDGET(window), TRUE);
+  GdkScreen* screen = gtk_widget_get_screen(GTK_WIDGET(window));
+  if (GDK_IS_SCREEN(screen)) {
+    GdkVisual* rgba_visual = gdk_screen_get_rgba_visual(screen);
+    if (rgba_visual) {
+      // Use the RGBA visual to get alpha channel
+      gtk_widget_set_visual(GTK_WIDGET(window), rgba_visual);
+    }
+  }
 
-  // 7. Ensure it can receive focus for icon interactions (optional but recommended for clickable desktops).
-  // If you want it purely background non-interactive, set this to FALSE.
-  gtk_window_set_accept_focus(window, TRUE);
+  // Resize/move to cover primary monitor
+  GdkRectangle monitor_geometry;
+  GdkDisplay* display = gdk_display_get_default();
+  if (display) {
+    GdkMonitor* mon = gdk_display_get_primary_monitor(display);
+    if (!mon) mon = gdk_display_get_monitor(display, 0);
+    if (mon) {
+      gdk_monitor_get_geometry(mon, &monitor_geometry);
+      gtk_window_move(window, monitor_geometry.x, monitor_geometry.y);
+      gtk_window_set_default_size(window, monitor_geometry.width, monitor_geometry.height);
+    } else {
+      // fallback: fullscreen
+      gtk_window_fullscreen(window);
+    }
+  } else {
+    gtk_window_fullscreen(window);
+  }
 
-  // -------------------------------------------------------------
-  // VENOM DESKTOP NUCLEAR HINTS - END
-  // -------------------------------------------------------------
+  // Realize early so we can set X11 properties and background RGBA
+  gtk_widget_realize(GTK_WIDGET(window));
+
+#ifdef GDK_WINDOWING_X11
+  apply_x11_desktop_hints(window);
+
+  // Set the X11 window background to transparent (if supported)
+  GdkWindow* gdk_window = gtk_widget_get_window(GTK_WIDGET(window));
+  if (GDK_IS_X11_WINDOW(gdk_window)) {
+    Display* dpy = GDK_DISPLAY_XDISPLAY(gdk_window_get_display(gdk_window));
+    Window xid = GDK_WINDOW_XID(gdk_window);
+    // Setting background pixmap to None and using composite should allow alpha
+    XSetWindowBackgroundPixmap(dpy, xid, None);
+    XClearWindow(dpy, xid);
+    XFlush(dpy);
+  }
+#endif
 
   g_autoptr(FlDartProject) project = fl_dart_project_new();
   fl_dart_project_set_dart_entrypoint_arguments(project, self->dart_entrypoint_arguments);
 
   FlView* view = fl_view_new(project);
-  GdkRGBA background_color;
-  // Use transparent background to let standard wallpaper shine through if needed during load
-  gdk_rgba_parse(&background_color, "#00000000"); 
-  fl_view_set_background_color(view, &background_color);
-  gtk_widget_show(GTK_WIDGET(view));
-  gtk_container_add(GTK_CONTAINER(window), GTK_WIDGET(view));
 
+  // Important: set FlView background transparent before adding to container
+  GdkRGBA transparent;
+  gdk_rgba_parse(&transparent, "rgba(0,0,0,0)");
+  fl_view_set_background_color(view, &transparent);
+
+  gtk_container_add(GTK_CONTAINER(window), GTK_WIDGET(view));
+  gtk_widget_show(GTK_WIDGET(view));
+
+  // show the window (the first-frame callback will show top-level)
   g_signal_connect_swapped(view, "first-frame", G_CALLBACK(first_frame_cb), self);
-  gtk_widget_realize(GTK_WIDGET(view));
 
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
-
-  gtk_widget_grab_focus(GTK_WIDGET(view));
+  gtk_widget_show(GTK_WIDGET(window));
 }
 
-// Implements GApplication::local_command_line.
 static gboolean my_application_local_command_line(GApplication* application, gchar*** arguments, int* exit_status) {
   MyApplication* self = MY_APPLICATION(application);
   self->dart_entrypoint_arguments = g_strdupv(*arguments + 1);
@@ -90,7 +142,6 @@ static gboolean my_application_local_command_line(GApplication* application, gch
 
   g_application_activate(application);
   *exit_status = 0;
-
   return TRUE;
 }
 
