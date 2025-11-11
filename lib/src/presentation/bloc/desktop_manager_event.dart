@@ -41,3 +41,11 @@ class DropFilesEvent extends DesktopManagerEvent {
   @override
   List<Object?> get props => [paths, dropX, dropY];
 }
+
+class MoveFileEvent extends DesktopManagerEvent {
+  final String sourcePath;
+  final String targetPath;
+  const MoveFileEvent({required this.sourcePath, required this.targetPath});
+  @override
+  List<Object?> get props => [sourcePath, targetPath];
+}

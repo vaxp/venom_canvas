@@ -84,6 +84,31 @@ class DesktopRepositoryImpl implements DesktopRepository {
   }
 
   @override
+  Future<String?> moveFile(String sourcePath, String targetDir) async {
+    try {
+      final targetDirEntity = Directory(targetDir);
+      if (!targetDirEntity.existsSync()) return null;
+      final basename = p.basename(sourcePath);
+      final destPath = p.join(targetDir, basename);
+      if (sourcePath == destPath) return destPath;
+      final sourceEntity = FileSystemEntity.typeSync(sourcePath);
+      if (sourceEntity == FileSystemEntityType.notFound) return null;
+      try {
+        if (sourceEntity == FileSystemEntityType.directory) {
+          await Directory(sourcePath).rename(destPath);
+        } else {
+          await File(sourcePath).rename(destPath);
+        }
+        return destPath;
+      } catch (_) {
+        return null;
+      }
+    } catch (_) {
+      return null;
+    }
+  }
+
+  @override
   Stream<void> watchDesktop() {
     return _watchStream ??= desktopDir.watch().map((_) => null).asBroadcastStream();
   }

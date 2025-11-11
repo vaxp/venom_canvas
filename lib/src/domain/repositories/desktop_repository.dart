@@ -23,6 +23,9 @@ abstract class DesktopRepository {
   /// Copy or move an external file into the desktop directory. Returns destination path.
   Future<String?> copyFileToDesktop(String srcPath);
 
+  /// Move a file to a target directory. Returns the new path if successful.
+  Future<String?> moveFile(String sourcePath, String targetDir);
+
   /// Watch for filesystem changes on the desktop. Emits a value whenever something changes.
   Stream<void> watchDesktop();
 }

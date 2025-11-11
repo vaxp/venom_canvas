@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:equatable/equatable.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:path/path.dart' as p;
 
 import '../../domain/repositories/desktop_repository.dart';
 
@@ -19,6 +21,7 @@ class DesktopManagerBloc extends Bloc<DesktopManagerEvent, DesktopManagerState> 
     on<SetWallpaperEvent>(_onSetWallpaper);
     on<UpdatePositionEvent>(_onUpdatePosition);
     on<DropFilesEvent>(_onDropFiles);
+    on<MoveFileEvent>(_onMoveFile);
   }
 
   Future<void> _onLoad(LoadDesktopEvent event, Emitter<DesktopManagerState> emit) async {
@@ -87,6 +90,26 @@ class DesktopManagerBloc extends Bloc<DesktopManagerEvent, DesktopManagerState> 
       await repository.saveLayout(updated);
       final entries = await repository.listEntries();
       emit(DesktopLoaded(entries: entries, wallpaperPath: current.wallpaperPath, positions: updated));
+    }
+  }
+
+  Future<void> _onMoveFile(MoveFileEvent event, Emitter<DesktopManagerState> emit) async {
+    try {
+      String targetDir;
+      if (FileSystemEntity.isDirectorySync(event.targetPath)) {
+        targetDir = event.targetPath;
+      } else {
+        targetDir = p.dirname(event.targetPath);
+      }
+      await repository.moveFile(event.sourcePath, targetDir);
+      final current = state;
+      if (current is DesktopLoaded) {
+        final entries = await repository.listEntries();
+        final positions = await repository.readLayout();
+        emit(DesktopLoaded(entries: entries, wallpaperPath: current.wallpaperPath, positions: positions));
+      }
+    } catch (_) {
+      add(RefreshDesktopEvent());
     }
   }
 
