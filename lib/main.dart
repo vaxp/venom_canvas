@@ -143,6 +143,7 @@ class _DesktopViewState extends State<DesktopView> {
   final GlobalKey _stackKey = GlobalKey();
   OverlayEntry? _contextMenuEntry;
   Offset? _lastContextTapLocal;
+  String? _contextMenuTargetPath;
   bool _isSelecting = false;
   Offset? _selectionStart;
   Offset? _selectionEnd;
@@ -239,10 +240,16 @@ class _DesktopViewState extends State<DesktopView> {
   void _removeContextMenu() {
     _contextMenuEntry?.remove();
     _contextMenuEntry = null;
+    _contextMenuTargetPath = null;
   }
 
-  void _showContextMenu(Offset globalPosition) {
+  void _showContextMenu(
+    Offset globalPosition, {
+    List<_ContextMenuItem>? items,
+    String? targetPath,
+  }) {
     _removeContextMenu();
+    _contextMenuTargetPath = targetPath;
     final overlay = Overlay.maybeOf(context);
     if (overlay == null) return;
     final overlayBox = overlay.context.findRenderObject() as RenderBox?;
@@ -252,7 +259,7 @@ class _DesktopViewState extends State<DesktopView> {
     final entry = OverlayEntry(
       builder: (ctx) => _GlassContextMenu(
         anchor: anchor,
-        items: _buildContextMenuItems(),
+        items: items ?? _buildDesktopContextMenuItems(),
         onClose: _removeContextMenu,
         onAction: (action) => _handleContextMenuAction(action),
       ),
@@ -261,8 +268,8 @@ class _DesktopViewState extends State<DesktopView> {
     _contextMenuEntry = entry;
   }
 
-  List<_ContextMenuItem> _buildContextMenuItems() {
-    final bool canPaste = false; // TODO: wire real clipboard paste support.
+  List<_ContextMenuItem> _buildDesktopContextMenuItems() {
+    final bool canPaste = false; 
 
     return [
       _ContextMenuItem.action(
@@ -416,6 +423,48 @@ class _DesktopViewState extends State<DesktopView> {
     ];
   }
 
+  List<_ContextMenuItem> _buildEntityContextMenuItems(String path) {
+    final bool canPaste = false; // TODO: wire clipboard operations.
+
+    return [
+      _ContextMenuItem.action(
+        id: 'entity:rename',
+        icon: Icons.drive_file_rename_outline,
+        label: 'Rename',
+      ),
+      _ContextMenuItem.action(
+        id: 'entity:delete',
+        icon: Icons.delete_rounded,
+        label: 'Delete',
+      ),
+      const _ContextMenuItem.divider(),
+      _ContextMenuItem.action(
+        id: 'entity:cut',
+        icon: Icons.content_cut_rounded,
+        label: 'Cut',
+        enabled: false,
+      ),
+      _ContextMenuItem.action(
+        id: 'entity:copy',
+        icon: Icons.content_copy_rounded,
+        label: 'Copy',
+        enabled: false,
+      ),
+      _ContextMenuItem.action(
+        id: 'entity:paste',
+        icon: Icons.content_paste_rounded,
+        label: 'Paste',
+        enabled: canPaste,
+      ),
+      const _ContextMenuItem.divider(),
+      _ContextMenuItem.action(
+        id: 'entity:details',
+        icon: Icons.info_outline,
+        label: 'Details',
+      ),
+    ];
+  }
+
   Future<void> _handleContextMenuAction(String action) async {
     _removeContextMenu();
     final clickPos =
@@ -521,6 +570,32 @@ class _DesktopViewState extends State<DesktopView> {
         break;
       case 'display_settings':
         await _launchDisplaySettings();
+        break;
+      case 'entity:rename':
+        final renameTarget =
+            _contextMenuTargetPath != null ? p.basename(_contextMenuTargetPath!) : null;
+        _showUnavailable(
+          renameTarget != null ? 'Rename "$renameTarget"' : 'Rename',
+        );
+        break;
+      case 'entity:delete':
+        final deleteTarget =
+            _contextMenuTargetPath != null ? p.basename(_contextMenuTargetPath!) : null;
+        _showUnavailable(
+          deleteTarget != null ? 'Delete "$deleteTarget"' : 'Delete',
+        );
+        break;
+      case 'entity:cut':
+        _showUnavailable('Cut');
+        break;
+      case 'entity:copy':
+        _showUnavailable('Copy');
+        break;
+      case 'entity:paste':
+        _showUnavailable('Paste');
+        break;
+      case 'entity:details':
+        _showUnavailable('Details');
         break;
       default:
         break;
@@ -816,7 +891,10 @@ class _DesktopViewState extends State<DesktopView> {
         child: GestureDetector(
           onSecondaryTapUp: (details) {
             _lastContextTapLocal = details.localPosition;
-            _showContextMenu(details.globalPosition);
+            _showContextMenu(
+              details.globalPosition,
+              targetPath: null,
+            );
           },
           behavior: HitTestBehavior.translucent,
           child: Listener(
@@ -1209,6 +1287,26 @@ cd "__WD__" && exec sh -lc "${SHELL:-bash}"
       left: position.dx,
       top: position.dy,
       child: GestureDetector(
+        onSecondaryTapUp: (details) {
+          final renderBox =
+              _stackKey.currentContext?.findRenderObject() as RenderBox?;
+          final localTap = renderBox != null
+              ? renderBox.globalToLocal(details.globalPosition)
+              : details.localPosition;
+
+          setState(() {
+            _selectedPaths
+              ..clear()
+              ..add(path);
+          });
+
+          _lastContextTapLocal = localTap;
+          _showContextMenu(
+            details.globalPosition,
+            items: _buildEntityContextMenuItems(path),
+            targetPath: path,
+          );
+        },
         onPanStart: (details) {
           setState(() {
             _draggingPath = path;
