@@ -22,6 +22,8 @@ class DesktopManagerBloc extends Bloc<DesktopManagerEvent, DesktopManagerState> 
     on<UpdatePositionEvent>(_onUpdatePosition);
     on<DropFilesEvent>(_onDropFiles);
     on<MoveFileEvent>(_onMoveFile);
+    on<RenameEntityEvent>(_onRenameEntity);
+    on<DeleteEntityEvent>(_onDeleteEntity);
   }
 
   Future<void> _onLoad(LoadDesktopEvent event, Emitter<DesktopManagerState> emit) async {
@@ -111,6 +113,54 @@ class DesktopManagerBloc extends Bloc<DesktopManagerEvent, DesktopManagerState> 
     } catch (_) {
       add(RefreshDesktopEvent());
     }
+  }
+
+  Future<void> _onRenameEntity(RenameEntityEvent event, Emitter<DesktopManagerState> emit) async {
+    final current = state;
+    if (current is! DesktopLoaded) return;
+    final newPath = await repository.renameEntity(event.sourcePath, event.newName);
+    if (newPath == null) {
+      add(RefreshDesktopEvent());
+      return;
+    }
+
+    final updatedEntries = current.entries
+        .map((entry) => entry == event.sourcePath ? newPath : entry)
+        .toList(growable: false);
+
+    final updatedPositions = Map<String, Map<String, double>>.from(current.positions);
+    final oldKey = p.basename(event.sourcePath);
+    final newKey = p.basename(newPath);
+    final coords = updatedPositions.remove(oldKey);
+    if (coords != null) {
+      updatedPositions[newKey] = coords;
+    }
+
+    emit(DesktopLoaded(
+      entries: updatedEntries,
+      wallpaperPath: current.wallpaperPath,
+      positions: updatedPositions,
+    ));
+  }
+
+  Future<void> _onDeleteEntity(DeleteEntityEvent event, Emitter<DesktopManagerState> emit) async {
+    final current = state;
+    if (current is! DesktopLoaded) return;
+    final deleted = await repository.deleteEntity(event.path);
+    if (!deleted) {
+      add(RefreshDesktopEvent());
+      return;
+    }
+
+    final updatedEntries = current.entries.where((entry) => entry != event.path).toList(growable: false);
+    final updatedPositions = Map<String, Map<String, double>>.from(current.positions)
+      ..remove(p.basename(event.path));
+
+    emit(DesktopLoaded(
+      entries: updatedEntries,
+      wallpaperPath: current.wallpaperPath,
+      positions: updatedPositions,
+    ));
   }
 
   @override

@@ -49,3 +49,18 @@ class MoveFileEvent extends DesktopManagerEvent {
   @override
   List<Object?> get props => [sourcePath, targetPath];
 }
+
+class RenameEntityEvent extends DesktopManagerEvent {
+  final String sourcePath;
+  final String newName;
+  const RenameEntityEvent({required this.sourcePath, required this.newName});
+  @override
+  List<Object?> get props => [sourcePath, newName];
+}
+
+class DeleteEntityEvent extends DesktopManagerEvent {
+  final String path;
+  const DeleteEntityEvent({required this.path});
+  @override
+  List<Object?> get props => [path];
+}

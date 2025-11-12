@@ -28,4 +28,10 @@ abstract class DesktopRepository {
 
   /// Watch for filesystem changes on the desktop. Emits a value whenever something changes.
   Stream<void> watchDesktop();
+
+  /// Rename an existing entity. Returns the new absolute path when successful.
+  Future<String?> renameEntity(String sourcePath, String newName);
+
+  /// Delete an entity (file or directory) from disk.
+  Future<bool> deleteEntity(String path);
 }

@@ -114,6 +114,106 @@ class DesktopRepositoryImpl implements DesktopRepository {
   }
 
   @override
+  Future<String?> renameEntity(String sourcePath, String newName) async {
+    try {
+      final trimmed = newName.trim();
+      if (trimmed.isEmpty) return null;
+
+      final currentType = FileSystemEntity.typeSync(sourcePath, followLinks: false);
+      if (currentType == FileSystemEntityType.notFound) return null;
+
+      final dirPath = p.dirname(sourcePath);
+      final safeName = p.basename(trimmed);
+      final desiredPath = p.join(dirPath, safeName);
+
+      String targetPath;
+      if (desiredPath == sourcePath) {
+        targetPath = sourcePath;
+      } else {
+        targetPath = _resolveUniquePath(dirPath, safeName, originalPath: sourcePath);
+      }
+
+      String? resultPath;
+      if (currentType == FileSystemEntityType.directory) {
+        resultPath = (await Directory(sourcePath).rename(targetPath)).path;
+      } else {
+        resultPath = (await File(sourcePath).rename(targetPath)).path;
+      }
+
+      _renameLayoutEntry(p.basename(sourcePath), p.basename(resultPath));
+      return resultPath;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  @override
+  Future<bool> deleteEntity(String path) async {
+    try {
+      final type = FileSystemEntity.typeSync(path, followLinks: false);
+      if (type == FileSystemEntityType.notFound) return false;
+
+      if (type == FileSystemEntityType.directory) {
+        await Directory(path).delete(recursive: true);
+      } else {
+        await File(path).delete();
+      }
+
+      _removeLayoutEntry(p.basename(path));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  String _resolveUniquePath(String dirPath, String desiredName, {String? originalPath}) {
+    String candidateName = desiredName;
+    String candidatePath = p.join(dirPath, candidateName);
+    if (candidatePath == originalPath) return candidatePath;
+
+    final extension = p.extension(candidateName);
+    final baseName = extension.isEmpty
+        ? candidateName
+        : candidateName.substring(0, candidateName.length - extension.length);
+    int counter = 1;
+    while (FileSystemEntity.typeSync(candidatePath, followLinks: false) !=
+        FileSystemEntityType.notFound) {
+      final nextName = extension.isEmpty
+          ? '$baseName ($counter)'
+          : '$baseName ($counter)$extension';
+      candidatePath = p.join(dirPath, nextName);
+      if (candidatePath == originalPath) {
+        return candidatePath;
+      }
+      counter++;
+    }
+    return candidatePath;
+  }
+
+  void _renameLayoutEntry(String oldKey, String newKey) {
+    try {
+      if (!layoutFile.existsSync()) return;
+      final json = jsonDecode(layoutFile.readAsStringSync());
+      if (json is! Map<String, dynamic>) return;
+      if (!json.containsKey(oldKey)) return;
+      final value = json.remove(oldKey);
+      json[newKey] = value;
+      layoutFile.writeAsStringSync(jsonEncode(json));
+    } catch (_) {}
+  }
+
+  void _removeLayoutEntry(String key) {
+    try {
+      if (!layoutFile.existsSync()) return;
+      final json = jsonDecode(layoutFile.readAsStringSync());
+      if (json is! Map<String, dynamic>) return;
+      if (!json.containsKey(key)) return;
+      json.remove(key);
+      layoutFile.writeAsStringSync(jsonEncode(json));
+    } catch (_) {}
+  }
+
+  @override
   Future<void> launchEntity(String path) async {
     try {
       if (path.endsWith('.desktop')) {

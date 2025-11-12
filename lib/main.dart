@@ -466,11 +466,11 @@ class _DesktopViewState extends State<DesktopView> {
   }
 
   Future<void> _handleContextMenuAction(String action) async {
-    _removeContextMenu();
-    final clickPos =
-        _lastContextTapLocal ??
+    final targetPath = _contextMenuTargetPath;
+    final clickPos = _lastContextTapLocal ??
         const Offset(_gridStartX + 40, _gridStartY + 40);
     final baseDir = _desktopRoot();
+    _removeContextMenu();
 
     switch (action) {
       case 'new_folder':
@@ -572,18 +572,14 @@ class _DesktopViewState extends State<DesktopView> {
         await _launchDisplaySettings();
         break;
       case 'entity:rename':
-        final renameTarget =
-            _contextMenuTargetPath != null ? p.basename(_contextMenuTargetPath!) : null;
-        _showUnavailable(
-          renameTarget != null ? 'Rename "$renameTarget"' : 'Rename',
-        );
+        if (targetPath != null) {
+          await _renameEntity(targetPath);
+        }
         break;
       case 'entity:delete':
-        final deleteTarget =
-            _contextMenuTargetPath != null ? p.basename(_contextMenuTargetPath!) : null;
-        _showUnavailable(
-          deleteTarget != null ? 'Delete "$deleteTarget"' : 'Delete',
-        );
+        if (targetPath != null) {
+          await _deleteEntity(targetPath);
+        }
         break;
       case 'entity:cut':
         _showUnavailable('Cut');
@@ -595,11 +591,145 @@ class _DesktopViewState extends State<DesktopView> {
         _showUnavailable('Paste');
         break;
       case 'entity:details':
-        _showUnavailable('Details');
+        if (targetPath != null) {
+          await _showEntityDetails(targetPath);
+        }
         break;
       default:
         break;
     }
+  }
+
+  Future<void> _renameEntity(String targetPath) async {
+    final currentName = p.basename(targetPath);
+    final newName = await _promptName(
+      context,
+      title: 'Rename "$currentName"',
+      initial: currentName,
+    );
+    final trimmed = newName?.trim();
+    if (trimmed == null || trimmed.isEmpty || trimmed == currentName) return;
+
+    context.read<DesktopManagerBloc>().add(
+          RenameEntityEvent(sourcePath: targetPath, newName: trimmed),
+        );
+  }
+
+  Future<void> _deleteEntity(String targetPath) async {
+    final name = p.basename(targetPath);
+    final confirmed = await _confirmDelete(name);
+    if (!confirmed) return;
+
+    context.read<DesktopManagerBloc>().add(DeleteEntityEvent(path: targetPath));
+  }
+
+  Future<bool> _confirmDelete(String name) async {
+    return await showDialog<bool>(
+          context: context,
+          builder: (ctx) {
+            return AlertDialog(
+              backgroundColor: const Color(0xFF23232A),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+              title: const Text('Delete Item', style: TextStyle(color: Colors.white)),
+              content: Text(
+                'Are you sure you want to delete "$name"?',
+                style: const TextStyle(color: Colors.white70),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(false),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+                  onPressed: () => Navigator.of(ctx).pop(true),
+                  child: const Text('Delete'),
+                ),
+              ],
+            );
+          },
+        ) ??
+        false;
+  }
+
+  Future<void> _showEntityDetails(String path) async {
+    try {
+      final stat = await FileStat.stat(path);
+      final type = FileSystemEntity.typeSync(path, followLinks: false);
+      final isDirectory = type == FileSystemEntityType.directory;
+      final sizeString = isDirectory ? '—' : _formatBytes(stat.size);
+
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) {
+          return AlertDialog(
+            backgroundColor: const Color(0xFF23232A),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+            title: Text(
+              p.basename(path),
+              style: const TextStyle(color: Colors.white),
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _buildDetailRow('Type', isDirectory ? 'Folder' : 'File'),
+                const SizedBox(height: 8),
+                _buildDetailRow('Location', p.dirname(path)),
+                const SizedBox(height: 8),
+                _buildDetailRow('Size', sizeString),
+                const SizedBox(height: 8),
+                _buildDetailRow('Permissions', stat.modeString()),
+                const SizedBox(height: 8),
+                _buildDetailRow('Modified', stat.modified.toLocal().toString()),
+                const SizedBox(height: 8),
+                _buildDetailRow('Accessed', stat.accessed.toLocal().toString()),
+                const SizedBox(height: 8),
+                _buildDetailRow('Changed', stat.changed.toLocal().toString()),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('Close'),
+              ),
+            ],
+          );
+        },
+      );
+    } catch (_) {
+      _showUnavailable('Details');
+    }
+  }
+
+  Widget _buildDetailRow(String label, String value) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: TextStyle(color: Colors.white.withOpacity(0.7), fontSize: 12),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          value,
+          style: const TextStyle(color: Colors.white, fontSize: 13),
+        ),
+      ],
+    );
+  }
+
+  String _formatBytes(int bytes) {
+    if (bytes <= 0) return '0 B';
+    const suffixes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+    double size = bytes.toDouble();
+    int index = 0;
+    while (size >= 1024 && index < suffixes.length - 1) {
+      size /= 1024;
+      index++;
+    }
+    final value = index == 0 ? size.toStringAsFixed(0) : size.toStringAsFixed(1);
+    return '$value ${suffixes[index]}';
   }
 
   String _desktopRoot() {
