@@ -34,4 +34,10 @@ abstract class DesktopRepository {
 
   /// Delete an entity (file or directory) from disk.
   Future<bool> deleteEntity(String path);
+
+  /// Copy an entity into the provided directory. Returns the new path when successful.
+  Future<String?> copyEntity(String sourcePath, String targetDir);
+
+  /// Publish selected paths to the desktop clipboard (system & internal) with cut/copy semantics.
+  Future<void> setClipboardItems(List<String> paths, {required bool isCut});
 }

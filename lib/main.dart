@@ -11,9 +11,10 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:video_thumbnail/video_thumbnail.dart';
 import 'src/presentation/bloc/desktop_manager_bloc.dart';
 import 'src/data/desktop_repository_impl.dart';
-import 'package:video_thumbnail/video_thumbnail.dart';
+import 'src/domain/repositories/desktop_repository.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -148,6 +149,8 @@ class _DesktopViewState extends State<DesktopView> {
   Offset? _selectionStart;
   Offset? _selectionEnd;
   final Set<String> _selectedPaths = <String>{};
+  final List<String> _clipboardPaths = <String>[];
+  bool _clipboardIsCut = false;
 
   List<String> _applyView(List<String> original) {
     List<String> out = List<String>.from(original);
@@ -269,7 +272,7 @@ class _DesktopViewState extends State<DesktopView> {
   }
 
   List<_ContextMenuItem> _buildDesktopContextMenuItems() {
-    final bool canPaste = false; 
+    final bool canPaste = _clipboardPaths.isNotEmpty;
 
     return [
       _ContextMenuItem.action(
@@ -424,7 +427,7 @@ class _DesktopViewState extends State<DesktopView> {
   }
 
   List<_ContextMenuItem> _buildEntityContextMenuItems(String path) {
-    final bool canPaste = false; // TODO: wire clipboard operations.
+    final bool canPaste = _clipboardPaths.isNotEmpty;
 
     return [
       _ContextMenuItem.action(
@@ -442,13 +445,11 @@ class _DesktopViewState extends State<DesktopView> {
         id: 'entity:cut',
         icon: Icons.content_cut_rounded,
         label: 'Cut',
-        enabled: false,
       ),
       _ContextMenuItem.action(
         id: 'entity:copy',
         icon: Icons.content_copy_rounded,
         label: 'Copy',
-        enabled: false,
       ),
       _ContextMenuItem.action(
         id: 'entity:paste',
@@ -525,7 +526,7 @@ class _DesktopViewState extends State<DesktopView> {
         );
         break;
       case 'paste':
-        _showUnavailable('Paste');
+        await _pasteClipboard(null, clickPos);
         break;
       case 'select_all':
         _showUnavailable('Select all');
@@ -582,13 +583,23 @@ class _DesktopViewState extends State<DesktopView> {
         }
         break;
       case 'entity:cut':
-        _showUnavailable('Cut');
+        if (targetPath != null) {
+          _setClipboard(
+            _collectSelectionPaths(targetPath),
+            isCut: true,
+          );
+        }
         break;
       case 'entity:copy':
-        _showUnavailable('Copy');
+        if (targetPath != null) {
+          _setClipboard(
+            _collectSelectionPaths(targetPath),
+            isCut: false,
+          );
+        }
         break;
       case 'entity:paste':
-        _showUnavailable('Paste');
+        await _pasteClipboard(targetPath, clickPos);
         break;
       case 'entity:details':
         if (targetPath != null) {
@@ -1606,6 +1617,87 @@ cd "__WD__" && exec sh -lc "${SHELL:-bash}"
         context.read<DesktopManagerBloc>().add(SetWallpaperEvent(path));
       }
     } catch (_) {}
+  }
+
+  List<String> _collectSelectionPaths(String fallbackPath) {
+    if (_selectedPaths.isNotEmpty) {
+      return _selectedPaths.toList();
+    }
+    return [fallbackPath];
+  }
+
+  void _setClipboard(List<String> paths, {required bool isCut}) {
+    if (paths.isEmpty) return;
+    setState(() {
+      _clipboardPaths
+        ..clear()
+        ..addAll(paths);
+      _clipboardIsCut = isCut;
+    });
+    final label =
+        paths.length == 1 ? p.basename(paths.first) : '${paths.length} items';
+    _showClipboardSnackbar(
+      isCut ? 'Cut $label' : 'Copied $label',
+    );
+    unawaited(
+      context
+          .read<DesktopRepositoryImpl>()
+          .setClipboardItems(List<String>.from(paths), isCut: isCut),
+    );
+  }
+
+  Future<void> _pasteClipboard(String? targetPath, Offset clickPos) async {
+    if (_clipboardPaths.isEmpty) {
+      _showUnavailable('Paste');
+      return;
+    }
+    final targetDir = _resolvePasteDirectory(targetPath);
+    if (targetDir == null) {
+      _showUnavailable('Destination');
+      return;
+    }
+
+    final desktopRoot = _desktopRoot();
+    final targetIsDesktop = p.equals(targetDir, desktopRoot);
+    context.read<DesktopManagerBloc>().add(
+          PasteClipboardEvent(
+            sources: List<String>.from(_clipboardPaths),
+            isCut: _clipboardIsCut,
+            targetDirectory: targetDir,
+            targetIsDesktop: targetIsDesktop,
+            dropX: targetIsDesktop ? clickPos.dx : null,
+            dropY: targetIsDesktop ? clickPos.dy : null,
+          ),
+        );
+
+    if (_clipboardIsCut) {
+      setState(() {
+        _clipboardPaths.clear();
+        _clipboardIsCut = false;
+      });
+    }
+  }
+
+  String? _resolvePasteDirectory(String? targetPath) {
+    if (targetPath == null) {
+      return _desktopRoot();
+    }
+    if (FileSystemEntity.isDirectorySync(targetPath)) {
+      return targetPath;
+    }
+    final parent = p.dirname(targetPath);
+    return Directory(parent).existsSync() ? parent : null;
+  }
+
+  void _showClipboardSnackbar(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.black.withOpacity(0.85),
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 1),
+      ),
+    );
   }
 }
 

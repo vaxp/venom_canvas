@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
+import 'package:flutter/services.dart';
 
 import '../domain/repositories/desktop_repository.dart';
 
@@ -166,6 +167,79 @@ class DesktopRepositoryImpl implements DesktopRepository {
     }
   }
 
+  @override
+  Future<String?> copyEntity(String sourcePath, String targetDir) async {
+    try {
+      final type = FileSystemEntity.typeSync(sourcePath, followLinks: false);
+      if (type == FileSystemEntityType.notFound) return null;
+
+      final targetDirEntity = Directory(targetDir);
+      if (!targetDirEntity.existsSync()) return null;
+
+      final originalName = p.basename(sourcePath);
+      final destinationPath = _resolveUniquePath(targetDir, originalName);
+
+      if (type == FileSystemEntityType.directory) {
+        await _copyDirectory(Directory(sourcePath), Directory(destinationPath));
+      } else {
+        await File(sourcePath).copy(destinationPath);
+      }
+
+      return destinationPath;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  @override
+  Future<void> setClipboardItems(List<String> paths, {required bool isCut}) async {
+    if (paths.isEmpty) return;
+
+    final uriList = paths.map((path) => Uri.file(path).toString()).join('\n');
+    final nautilusBuffer = StringBuffer()
+      ..writeln(isCut ? 'cut' : 'copy');
+    for (final path in paths) {
+      nautilusBuffer.writeln(Uri.file(path).toString());
+    }
+    final nautilusPayload = nautilusBuffer.toString();
+
+    try {
+      await Clipboard.setData(ClipboardData(text: uriList));
+    } catch (_) {}
+
+    final clipboardCommands = [
+      _ClipboardCommand(
+        executable: 'wl-copy',
+        arguments: ['--type', 'x-special/nautilus-clipboard'],
+        payload: nautilusPayload,
+      ),
+      _ClipboardCommand(
+        executable: 'wl-copy',
+        arguments: ['--type', 'text/uri-list'],
+        payload: uriList,
+      ),
+      _ClipboardCommand(
+        executable: 'xclip',
+        arguments: ['-selection', 'clipboard', '-t', 'x-special/nautilus-clipboard', '-i'],
+        payload: nautilusPayload,
+      ),
+      _ClipboardCommand(
+        executable: 'xclip',
+        arguments: ['-selection', 'clipboard', '-t', 'text/uri-list', '-i'],
+        payload: uriList,
+      ),
+      _ClipboardCommand(
+        executable: 'xclip',
+        arguments: ['-selection', 'clipboard'],
+        payload: uriList,
+      ),
+    ];
+
+    for (final command in clipboardCommands) {
+      await _trySetClipboard(command);
+    }
+  }
+
   String _resolveUniquePath(String dirPath, String desiredName, {String? originalPath}) {
     String candidateName = desiredName;
     String candidatePath = p.join(dirPath, candidateName);
@@ -213,6 +287,37 @@ class DesktopRepositoryImpl implements DesktopRepository {
     } catch (_) {}
   }
 
+  Future<void> _copyDirectory(Directory source, Directory destination) async {
+    if (!destination.existsSync()) {
+      destination.createSync(recursive: true);
+    }
+
+    await for (final entity
+        in source.list(recursive: false, followLinks: false)) {
+      final newPath = p.join(destination.path, p.basename(entity.path));
+      if (entity is File) {
+        await entity.copy(newPath);
+      } else if (entity is Directory) {
+        await _copyDirectory(entity, Directory(newPath));
+      } else if (entity is Link) {
+        final target = await entity.target();
+        await Link(newPath).create(target, recursive: true);
+      }
+    }
+  }
+
+  Future<void> _trySetClipboard(_ClipboardCommand command) async {
+    try {
+      final process = await Process.start(command.executable, command.arguments);
+      process.stdin.write(command.payload);
+      await process.stdin.close();
+      await process.exitCode.timeout(const Duration(milliseconds: 500), onTimeout: () {
+        process.kill();
+        return 1;
+      });
+    } catch (_) {}
+  }
+
   @override
   Future<void> launchEntity(String path) async {
     try {
@@ -243,4 +348,16 @@ class DesktopRepositoryImpl implements DesktopRepository {
       wallpaperPath = path;
     } catch (_) {}
   }
+}
+
+class _ClipboardCommand {
+  final String executable;
+  final List<String> arguments;
+  final String payload;
+
+  const _ClipboardCommand({
+    required this.executable,
+    required this.arguments,
+    required this.payload,
+  });
 }

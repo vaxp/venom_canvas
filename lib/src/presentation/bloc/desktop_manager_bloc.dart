@@ -24,6 +24,7 @@ class DesktopManagerBloc extends Bloc<DesktopManagerEvent, DesktopManagerState> 
     on<MoveFileEvent>(_onMoveFile);
     on<RenameEntityEvent>(_onRenameEntity);
     on<DeleteEntityEvent>(_onDeleteEntity);
+    on<PasteClipboardEvent>(_onPasteClipboard);
   }
 
   Future<void> _onLoad(LoadDesktopEvent event, Emitter<DesktopManagerState> emit) async {
@@ -160,6 +161,70 @@ class DesktopManagerBloc extends Bloc<DesktopManagerEvent, DesktopManagerState> 
       entries: updatedEntries,
       wallpaperPath: current.wallpaperPath,
       positions: updatedPositions,
+    ));
+  }
+
+  Future<void> _onPasteClipboard(PasteClipboardEvent event, Emitter<DesktopManagerState> emit) async {
+    final current = state;
+    if (current is! DesktopLoaded) return;
+
+    final updatedPositions = Map<String, Map<String, double>>.from(current.positions);
+    final List<String> resultPaths = [];
+    bool anyChange = false;
+
+    for (final source in event.sources) {
+      if (event.isCut) {
+        final moved = await repository.moveFile(source, event.targetDirectory);
+        if (moved != null) {
+          resultPaths.add(moved);
+          anyChange = true;
+          if (!event.targetIsDesktop) {
+            updatedPositions.remove(p.basename(source));
+          }
+        }
+      } else {
+        final copied = await repository.copyEntity(source, event.targetDirectory);
+        if (copied != null) {
+          resultPaths.add(copied);
+          anyChange = true;
+        }
+      }
+    }
+
+    if (!anyChange) {
+      add(RefreshDesktopEvent());
+      return;
+    }
+
+    bool positionsChanged = false;
+    if (event.targetIsDesktop) {
+      final baseX = event.dropX ?? 40.0;
+      final baseY = event.dropY ?? 40.0;
+      for (int i = 0; i < resultPaths.length; i++) {
+        final filename = p.basename(resultPaths[i]);
+        updatedPositions[filename] = {
+          'x': baseX + i * 20.0,
+          'y': baseY + i * 20.0,
+        };
+      }
+      positionsChanged = true;
+    } else if (event.isCut) {
+      positionsChanged = true;
+    }
+
+    if (positionsChanged) {
+      await repository.saveLayout(updatedPositions);
+    }
+
+    final entries = await repository.listEntries();
+    final wallpaper = await repository.readWallpaperPath();
+    final positions =
+        positionsChanged ? updatedPositions : current.positions;
+
+    emit(DesktopLoaded(
+      entries: entries,
+      wallpaperPath: wallpaper,
+      positions: positions,
     ));
   }
 

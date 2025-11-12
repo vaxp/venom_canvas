@@ -64,3 +64,31 @@ class DeleteEntityEvent extends DesktopManagerEvent {
   @override
   List<Object?> get props => [path];
 }
+
+class PasteClipboardEvent extends DesktopManagerEvent {
+  final List<String> sources;
+  final bool isCut;
+  final String targetDirectory;
+  final bool targetIsDesktop;
+  final double? dropX;
+  final double? dropY;
+
+  const PasteClipboardEvent({
+    required this.sources,
+    required this.isCut,
+    required this.targetDirectory,
+    required this.targetIsDesktop,
+    this.dropX,
+    this.dropY,
+  });
+
+  @override
+  List<Object?> get props => [
+        sources,
+        isCut,
+        targetDirectory,
+        targetIsDesktop,
+        dropX,
+        dropY,
+      ];
+}
