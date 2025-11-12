@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/painting.dart';
+import 'package:flutter/gestures.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:path/path.dart' as p;
 import 'package:media_kit/media_kit.dart';
@@ -141,6 +143,10 @@ class _DesktopViewState extends State<DesktopView> {
   final GlobalKey _stackKey = GlobalKey();
   OverlayEntry? _contextMenuEntry;
   Offset? _lastContextTapLocal;
+  bool _isSelecting = false;
+  Offset? _selectionStart;
+  Offset? _selectionEnd;
+  final Set<String> _selectedPaths = <String>{};
 
   List<String> _applyView(List<String> original) {
     List<String> out = List<String>.from(original);
@@ -220,6 +226,8 @@ class _DesktopViewState extends State<DesktopView> {
       PaintingBinding.instance.imageCache.clear();
       setState(() => wallpaperKey = UniqueKey());
     }
+    final visibleSet = _applyView(widget.entries).toSet();
+    _selectedPaths.removeWhere((path) => !visibleSet.contains(path));
   }
 
   @override
@@ -789,6 +797,8 @@ class _DesktopViewState extends State<DesktopView> {
   @override
   Widget build(BuildContext context) {
     final entries = widget.entries;
+    final visibleEntries = _applyView(entries);
+    final Rect? selectionRect = _currentSelectionRect;
 
     return Scaffold(
       backgroundColor: Colors.transparent,
@@ -809,29 +819,52 @@ class _DesktopViewState extends State<DesktopView> {
             _showContextMenu(details.globalPosition);
           },
           behavior: HitTestBehavior.translucent,
-          child: Stack(
-            key: _stackKey,
-            fit: StackFit.expand,
-            children: [
-              KeyedSubtree(key: wallpaperKey, child: _buildSmartWallpaper()),
-              for (int i = 0, n = _applyView(entries).length; i < n; i++)
-                _buildFreeDraggableIcon(
-                  _applyView(entries)[i],
-                  i,
-                  widget.positions,
-                ),
-              if (_isDraggingExternal)
-                Container(
-                  color: Colors.teal.withOpacity(0.15),
-                  child: const Center(
-                    child: Icon(
-                      Icons.add_to_photos_rounded,
-                      size: 80,
-                      color: Colors.white54,
+          child: Listener(
+            behavior: HitTestBehavior.translucent,
+            onPointerDown: _handleDesktopPointerDown,
+            onPointerMove: _handleDesktopPointerMove,
+            onPointerUp: _handleDesktopPointerUp,
+            onPointerCancel: _handleDesktopPointerCancel,
+            child: Stack(
+              key: _stackKey,
+              fit: StackFit.expand,
+              children: [
+                KeyedSubtree(key: wallpaperKey, child: _buildSmartWallpaper()),
+                for (int i = 0, n = visibleEntries.length; i < n; i++)
+                  _buildFreeDraggableIcon(
+                    visibleEntries[i],
+                    i,
+                    widget.positions,
+                  ),
+                if (_isSelecting && selectionRect != null)
+                  Positioned.fromRect(
+                    rect: selectionRect,
+                    child: IgnorePointer(
+                      child: Container(
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: Colors.tealAccent.withOpacity(0.75),
+                            width: 1.2,
+                          ),
+                          color: Colors.tealAccent.withOpacity(0.15),
+                        ),
+                      ),
                     ),
                   ),
-                ),
-            ],
+                if (_isDraggingExternal)
+                  Container(
+                    color: Colors.teal.withOpacity(0.15),
+                    child: const Center(
+                      child: Icon(
+                        Icons.add_to_photos_rounded,
+                        size: 80,
+                        color: Colors.white54,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
           ),
         ),
       ),
@@ -1017,6 +1050,36 @@ cd "__WD__" && exec sh -lc "${SHELL:-bash}"
     return snappedDesired;
   }
 
+  Rect _iconRectForEntry(
+    String path,
+    int index,
+    Map<String, Map<String, double>> positions,
+  ) {
+    final filename = p.basename(path);
+    final posMap = positions[filename];
+    final basePos = posMap != null
+        ? Offset(posMap['x'] ?? 0, posMap['y'] ?? 0)
+        : _getDefaultPosition(index);
+    return Rect.fromLTWH(basePos.dx, basePos.dy, 90, 110);
+  }
+
+  Rect _normalizedRect(Offset start, Offset end) {
+    final left = math.min(start.dx, end.dx);
+    final top = math.min(start.dy, end.dy);
+    final right = math.max(start.dx, end.dx);
+    final bottom = math.max(start.dy, end.dy);
+    return Rect.fromLTRB(left, top, right, bottom);
+  }
+
+  Rect? get _currentSelectionRect {
+    if (!_isSelecting || _selectionStart == null || _selectionEnd == null) {
+      return null;
+    }
+    final rect = _normalizedRect(_selectionStart!, _selectionEnd!);
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    return rect;
+  }
+
   String? _findIconAtPosition(
     Offset localPos,
     Map<String, Map<String, double>> positions,
@@ -1024,17 +1087,93 @@ cd "__WD__" && exec sh -lc "${SHELL:-bash}"
   ) {
     for (int i = 0; i < visibleEntries.length; i++) {
       final entry = visibleEntries[i];
-      final filename = p.basename(entry);
-      final posMap = positions[filename];
-      final basePos = posMap != null
-          ? Offset(posMap['x']!, posMap['y']!)
-          : _getDefaultPosition(i);
-      final iconRect = Rect.fromLTWH(basePos.dx, basePos.dy, 90, 110);
+      final iconRect = _iconRectForEntry(entry, i, positions);
       if (iconRect.contains(localPos)) {
         return entry;
       }
     }
     return null;
+  }
+
+  void _updateSelectionRect(Offset current) {
+    if (_selectionStart == null) return;
+    final rect = _normalizedRect(_selectionStart!, current);
+    final visibleEntries = _applyView(widget.entries);
+    final Set<String> newlySelected = <String>{};
+    for (int i = 0; i < visibleEntries.length; i++) {
+      final candidateRect = _iconRectForEntry(
+        visibleEntries[i],
+        i,
+        widget.positions,
+      );
+      if (candidateRect.isEmpty) {
+        continue;
+      }
+      if (rect.overlaps(candidateRect)) {
+        newlySelected.add(visibleEntries[i]);
+      }
+    }
+    setState(() {
+      _selectionEnd = current;
+      _selectedPaths
+        ..clear()
+        ..addAll(newlySelected);
+    });
+  }
+
+  void _endSelection() {
+    if (!_isSelecting) return;
+    setState(() {
+      _isSelecting = false;
+      _selectionStart = null;
+      _selectionEnd = null;
+    });
+  }
+
+  void _handleDesktopPointerDown(PointerDownEvent event) {
+    if ((event.buttons & kPrimaryMouseButton) == 0) return;
+    _removeContextMenu();
+    final local = event.localPosition;
+    final visibleEntries = _applyView(widget.entries);
+    final hit = _findIconAtPosition(local, widget.positions, visibleEntries);
+    if (hit == null) {
+      setState(() {
+        _isSelecting = true;
+        _selectionStart = local;
+        _selectionEnd = local;
+        _selectedPaths.clear();
+      });
+    } else {
+      setState(() {
+        _isSelecting = false;
+        _selectionStart = null;
+        _selectionEnd = null;
+        _selectedPaths
+          ..clear()
+          ..add(hit);
+      });
+    }
+  }
+
+  void _handleDesktopPointerMove(PointerMoveEvent event) {
+    if (!_isSelecting || _selectionStart == null) return;
+    if ((event.buttons & kPrimaryMouseButton) == 0) {
+      _endSelection();
+      return;
+    }
+    _updateSelectionRect(event.localPosition);
+  }
+
+  void _handleDesktopPointerUp(PointerUpEvent event) {
+    if (_isSelecting) {
+      _endSelection();
+    }
+  }
+
+  void _handleDesktopPointerCancel(PointerCancelEvent event) {
+    if (_isSelecting) {
+      _endSelection();
+    }
   }
 
   Widget _buildFreeDraggableIcon(
@@ -1055,6 +1194,7 @@ cd "__WD__" && exec sh -lc "${SHELL:-bash}"
         _hoveredTargetPath == path &&
         _draggingPath != null &&
         _draggingPath != path;
+    final isSelected = _selectedPaths.contains(path);
     final position = isDragging && _dragOffset != null
         ? _dragOffset!
         : basePosition;
@@ -1142,9 +1282,16 @@ cd "__WD__" && exec sh -lc "${SHELL:-bash}"
             borderRadius: BorderRadius.circular(8),
             color: isTargeted
                 ? Colors.teal.withOpacity(0.3)
+                : isSelected
+                ? Colors.white.withOpacity(0.1)
                 : Colors.transparent,
             border: isTargeted
                 ? Border.all(color: Colors.teal, width: 2)
+                : isSelected
+                ? Border.all(
+                    color: Colors.tealAccent.withOpacity(0.7),
+                    width: 1.2,
+                  )
                 : null,
           ),
           child: Opacity(
@@ -1167,7 +1314,9 @@ cd "__WD__" && exec sh -lc "${SHELL:-bash}"
                           _getIconForFile(path),
                           key: ValueKey('icon-$filename'),
                           size: 48,
-                          color: Colors.white.withOpacity(0.9),
+                          color: isSelected
+                              ? Colors.white
+                              : Colors.white.withOpacity(0.9),
                         ),
                 ),
                 const SizedBox(height: 6),
@@ -1177,7 +1326,9 @@ cd "__WD__" && exec sh -lc "${SHELL:-bash}"
                     vertical: 2,
                   ),
                   decoration: BoxDecoration(
-                    color: Colors.black.withOpacity(0.25),
+                    color: isSelected
+                        ? Colors.tealAccent.withOpacity(0.25)
+                        : Colors.black.withOpacity(0.25),
                     borderRadius: BorderRadius.circular(4),
                   ),
                   child: Text(
@@ -1185,10 +1336,13 @@ cd "__WD__" && exec sh -lc "${SHELL:-bash}"
                     textAlign: TextAlign.center,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
+                    style: TextStyle(
                       color: Colors.white,
                       fontSize: 12,
                       height: 1.1,
+                      fontWeight: isSelected
+                          ? FontWeight.w600
+                          : FontWeight.w400,
                     ),
                   ),
                 ),
