@@ -9,10 +9,7 @@ class GridSystem {
   Offset snapToGrid(Offset raw) {
     final col = ((raw.dx - startX) / cellWidth).round().clamp(0, 10000);
     final row = ((raw.dy - startY) / cellHeight).round().clamp(0, 10000);
-    return Offset(
-      startX + col * cellWidth,
-      startY + row * cellHeight,
-    );
+    return Offset(startX + col * cellWidth, startY + row * cellHeight);
   }
 
   (int col, int row) cellForOffset(Offset offset) {
@@ -23,10 +20,7 @@ class GridSystem {
   }
 
   Offset offsetForCell(int col, int row) {
-    return Offset(
-      startX + col * cellWidth,
-      startY + row * cellHeight,
-    );
+    return Offset(startX + col * cellWidth, startY + row * cellHeight);
   }
 
   bool isCellOccupied(
@@ -77,13 +71,10 @@ class GridSystem {
   }
 
   Offset getDefaultPosition(int index) {
-    const colCount = 6;
-    final row = index % colCount;
-    final col = index ~/ colCount;
-    return Offset(
-      startX + (col * cellWidth),
-      startY + (row * cellHeight),
-    );
+    const rowCount = 6;
+    final row = index % rowCount;
+    final col = index ~/ rowCount;
+    return Offset(startX + (col * cellWidth), startY + (row * cellHeight));
   }
 
   int safeInt(int v) => v < 0 ? 0 : v;

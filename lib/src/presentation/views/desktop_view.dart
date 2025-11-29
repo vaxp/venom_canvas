@@ -351,7 +351,7 @@ class _DesktopViewState extends State<DesktopView> {
   void _arrangeIcons(List<String> allEntries) {
     final visible = _applyView(allEntries);
     int col = 0, row = 0;
-    const int colCount = 6;
+    const int rowCount = 6;
     for (final path in visible) {
       final filename = p.basename(path);
       final target = _gridSystem.offsetForCell(
@@ -362,9 +362,9 @@ class _DesktopViewState extends State<DesktopView> {
         UpdatePositionEvent(filename: filename, x: target.dx, y: target.dy),
       );
       row++;
-      if (row % colCount == 0) {
-        col++;
+      if (row >= rowCount) {
         row = 0;
+        col++;
       }
     }
   }
