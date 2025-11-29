@@ -11,6 +11,7 @@ class DesktopIcon extends StatefulWidget {
   final bool isDragging;
   final bool isTargeted;
   final VoidCallback onDoubleTap;
+  final VoidCallback onTap;
   final Function(TapUpDetails) onSecondaryTapUp;
   final Function(DragStartDetails) onPanStart;
   final Function(DragUpdateDetails) onPanUpdate;
@@ -24,6 +25,7 @@ class DesktopIcon extends StatefulWidget {
     required this.isDragging,
     required this.isTargeted,
     required this.onDoubleTap,
+    required this.onTap,
     required this.onSecondaryTapUp,
     required this.onPanStart,
     required this.onPanUpdate,
@@ -91,7 +93,7 @@ class _DesktopIconState extends State<DesktopIcon> {
 
   Future<void> _loadThumbnail() async {
     if (_thumbnail != null || _isLoadingThumbnail) return;
-    
+
     // Don't load thumbnails for directories
     if (FileSystemEntity.isDirectorySync(widget.path)) return;
 
@@ -225,15 +227,16 @@ class _DesktopIconState extends State<DesktopIcon> {
     if (FileSystemEntity.isDirectorySync(path)) {
       final name = p.basename(path).toLowerCase();
       String iconName = 'folder';
-      
+
       if (_availableFolderIcons.contains(name)) {
         iconName = name;
-      } else if (name == 'videos' && _availableFolderIcons.contains('folder-videos')) {
+      } else if (name == 'videos' &&
+          _availableFolderIcons.contains('folder-videos')) {
         iconName = 'folder-videos';
       } else if (_availableFolderIcons.contains('folder-$name')) {
         iconName = 'folder-$name';
       }
-      
+
       return SvgPicture.asset(
         'assets/folder_icons/$iconName.svg',
         width: size,
@@ -252,28 +255,26 @@ class _DesktopIconState extends State<DesktopIcon> {
 
     // Fallback logic
     if (iconName == null) {
-       if (ext.isEmpty) {
-         iconName = 'text-x-generic'; // Assume text for no extension files like 'LICENSE'
-       } else {
-         iconName = 'unknown';
-       }
+      if (ext.isEmpty) {
+        iconName =
+            'text-x-generic'; // Assume text for no extension files like 'LICENSE'
+      } else {
+        iconName = 'unknown';
+      }
     }
 
     // Check if we need to fallback to IconData if SVG not found (though we assume SVGs exist for mapped items)
     // For safety, we can wrap in a try-catch or just rely on the asset existing.
-    // Given the large list, we should be good. 
+    // Given the large list, we should be good.
     // However, if 'application-x-desktop' is missing, we might want a fallback.
-    
+
     // Let's use a helper to return the SvgPicture
     return SvgPicture.asset(
       'assets/mimes/$iconName.svg',
       width: size,
       height: size,
-      placeholderBuilder: (context) => Icon(
-        Icons.insert_drive_file_rounded,
-        size: size,
-        color: color,
-      ),
+      placeholderBuilder: (context) =>
+          Icon(Icons.insert_drive_file_rounded, size: size, color: color),
     );
   }
 
@@ -296,7 +297,9 @@ class _DesktopIconState extends State<DesktopIcon> {
         onPanStart: widget.onPanStart,
         onPanUpdate: widget.onPanUpdate,
         onPanEnd: widget.onPanEnd,
+
         onDoubleTap: widget.onDoubleTap,
+        onTap: widget.onTap,
         child: Container(
           width: 90,
           padding: const EdgeInsets.all(8),

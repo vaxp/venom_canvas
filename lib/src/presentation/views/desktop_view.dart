@@ -56,6 +56,9 @@ class _DesktopViewState extends State<DesktopView> {
   final List<String> _clipboardPaths = <String>[];
   bool _clipboardIsCut = false;
 
+  // For multi-drag
+  final Map<String, Offset> _initialItemPositions = {};
+
   @override
   void initState() {
     super.initState();
@@ -171,7 +174,8 @@ class _DesktopViewState extends State<DesktopView> {
     final entry = OverlayEntry(
       builder: (ctx) => GlassContextMenu(
         anchor: anchor,
-        items: items ??
+        items:
+            items ??
             DesktopContextMenuBuilder.buildDesktopContextMenuItems(
               sortMode: _sortMode,
               showHidden: _showHidden,
@@ -187,7 +191,8 @@ class _DesktopViewState extends State<DesktopView> {
 
   Future<void> _handleContextMenuAction(String action) async {
     final targetPath = _contextMenuTargetPath;
-    final clickPos = _lastContextTapLocal ??
+    final clickPos =
+        _lastContextTapLocal ??
         const Offset(GridSystem.startX + 40, GridSystem.startY + 40);
     final baseDir = _desktopRoot();
     _removeContextMenu();
@@ -309,18 +314,12 @@ class _DesktopViewState extends State<DesktopView> {
         break;
       case 'entity:cut':
         if (targetPath != null) {
-          _setClipboard(
-            _collectSelectionPaths(targetPath),
-            isCut: true,
-          );
+          _setClipboard(_collectSelectionPaths(targetPath), isCut: true);
         }
         break;
       case 'entity:copy':
         if (targetPath != null) {
-          _setClipboard(
-            _collectSelectionPaths(targetPath),
-            isCut: false,
-          );
+          _setClipboard(_collectSelectionPaths(targetPath), isCut: false);
         }
         break;
       case 'entity:paste':
@@ -352,7 +351,9 @@ class _DesktopViewState extends State<DesktopView> {
     for (final path in visible) {
       final filename = p.basename(path);
       final target = _gridSystem.offsetForCell(
-          _gridSystem.safeInt(col), _gridSystem.safeInt(row));
+        _gridSystem.safeInt(col),
+        _gridSystem.safeInt(row),
+      );
       context.read<DesktopManagerBloc>().add(
         UpdatePositionEvent(filename: filename, x: target.dx, y: target.dy),
       );
@@ -495,14 +496,31 @@ cd "__WD__" && exec sh -lc "${SHELL:-bash}"
         _selectedPaths.clear();
       });
     } else {
-      setState(() {
-        _isSelecting = false;
-        _selectionStart = null;
-        _selectionEnd = null;
-        _selectedPaths
-          ..clear()
-          ..add(hit);
-      });
+      // If we clicked an icon that is NOT selected, we don't select it immediately here.
+      // We wait for either a drag start (which selects it) or a tap (which selects it).
+      // If it IS selected, we definitely don't want to clear selection.
+
+      // Actually, standard behavior:
+      // - Mouse down on unselected: select it immediately (and clear others)?
+      //   - If we do that, then drag works fine.
+      // - Mouse down on selected: DO NOTHING to selection. Wait for drag or up.
+
+      if (!_selectedPaths.contains(hit)) {
+        // If not selected, we can select it now, but we must clear others?
+        // Yes, usually clicking an unselected item clears others.
+        // But if we are about to drag, we want that.
+        setState(() {
+          _isSelecting = false;
+          _selectionStart = null;
+          _selectionEnd = null;
+          _selectedPaths
+            ..clear()
+            ..add(hit);
+        });
+      }
+      // If it WAS selected, we do nothing here.
+      // If the user just clicks (up/down) on a selected item without dragging,
+      // we should clear others on UP (or tap).
     }
   }
 
@@ -568,15 +586,15 @@ cd "__WD__" && exec sh -lc "${SHELL:-bash}"
         ..addAll(paths);
       _clipboardIsCut = isCut;
     });
-    final label =
-        paths.length == 1 ? p.basename(paths.first) : '${paths.length} items';
-    _showClipboardSnackbar(
-      isCut ? 'Cut $label' : 'Copied $label',
-    );
+    final label = paths.length == 1
+        ? p.basename(paths.first)
+        : '${paths.length} items';
+    _showClipboardSnackbar(isCut ? 'Cut $label' : 'Copied $label');
     unawaited(
-      context
-          .read<DesktopRepositoryImpl>()
-          .setClipboardItems(List<String>.from(paths), isCut: isCut),
+      context.read<DesktopRepositoryImpl>().setClipboardItems(
+        List<String>.from(paths),
+        isCut: isCut,
+      ),
     );
   }
 
@@ -594,15 +612,15 @@ cd "__WD__" && exec sh -lc "${SHELL:-bash}"
     final desktopRoot = _desktopRoot();
     final targetIsDesktop = p.equals(targetDir, desktopRoot);
     context.read<DesktopManagerBloc>().add(
-          PasteClipboardEvent(
-            sources: List<String>.from(_clipboardPaths),
-            isCut: _clipboardIsCut,
-            targetDirectory: targetDir,
-            targetIsDesktop: targetIsDesktop,
-            dropX: targetIsDesktop ? clickPos.dx : null,
-            dropY: targetIsDesktop ? clickPos.dy : null,
-          ),
-        );
+      PasteClipboardEvent(
+        sources: List<String>.from(_clipboardPaths),
+        isCut: _clipboardIsCut,
+        targetDirectory: targetDir,
+        targetIsDesktop: targetIsDesktop,
+        dropX: targetIsDesktop ? clickPos.dx : null,
+        dropY: targetIsDesktop ? clickPos.dy : null,
+      ),
+    );
 
     if (_clipboardIsCut) {
       setState(() {
@@ -674,10 +692,7 @@ cd "__WD__" && exec sh -lc "${SHELL:-bash}"
         child: GestureDetector(
           onSecondaryTapUp: (details) {
             _lastContextTapLocal = details.localPosition;
-            _showContextMenu(
-              details.globalPosition,
-              targetPath: null,
-            );
+            _showContextMenu(details.globalPosition, targetPath: null);
           },
           behavior: HitTestBehavior.translucent,
           child: Listener(
@@ -741,9 +756,23 @@ cd "__WD__" && exec sh -lc "${SHELL:-bash}"
         _draggingPath != null &&
         _draggingPath != path;
     final isSelected = _selectedPaths.contains(path);
-    final position = isDragging && _dragOffset != null
-        ? _dragOffset!
-        : basePosition;
+
+    Offset position = basePosition;
+    if (isDragging && _dragOffset != null) {
+      // The leader (the one being dragged directly)
+      position = _dragOffset!;
+    } else if (isSelected &&
+        _draggingPath != null &&
+        _initialItemPositions.containsKey(path)) {
+      // Follower: calculate delta from leader
+      final leaderInitial = _initialItemPositions[_draggingPath];
+      final myInitial = _initialItemPositions[path];
+      if (leaderInitial != null && myInitial != null && _dragOffset != null) {
+        final dx = _dragOffset!.dx - leaderInitial.dx;
+        final dy = _dragOffset!.dy - leaderInitial.dy;
+        position = myInitial + Offset(dx, dy);
+      }
+    }
 
     return DesktopIcon(
       path: path,
@@ -753,6 +782,16 @@ cd "__WD__" && exec sh -lc "${SHELL:-bash}"
       isTargeted: isTargeted,
       onDoubleTap: () =>
           context.read<DesktopManagerBloc>().add(LaunchEntityEvent(path)),
+      onTap: () {
+        // Handle single tap: clear other selections if we are not holding Ctrl/Shift (not implemented yet)
+        // and just select this one.
+        // This runs if we didn't drag.
+        setState(() {
+          _selectedPaths
+            ..clear()
+            ..add(path);
+        });
+      },
       onSecondaryTapUp: (details) {
         final renderBox =
             _stackKey.currentContext?.findRenderObject() as RenderBox?;
@@ -778,12 +817,44 @@ cd "__WD__" && exec sh -lc "${SHELL:-bash}"
       },
       onPanStart: (details) {
         setState(() {
+          // If dragging something not selected, clear selection and select it
+          if (!_selectedPaths.contains(path)) {
+            _selectedPaths.clear();
+            _selectedPaths.add(path);
+          }
+
           _draggingPath = path;
+
+          // Record initial positions for all selected items
+          _initialItemPositions.clear();
+          for (final selectedPath in _selectedPaths) {
+            final fName = p.basename(selectedPath);
+            final pMap = widget.positions[fName];
+            // Find index if possible, otherwise 0 (fallback)
+            final idx = widget.entries.indexOf(selectedPath);
+            final base = pMap != null
+                ? Offset(pMap['x']!, pMap['y']!)
+                : _gridSystem.getDefaultPosition(idx >= 0 ? idx : 0);
+            _initialItemPositions[selectedPath] = base;
+          }
+
           final renderBox =
               _stackKey.currentContext?.findRenderObject() as RenderBox?;
           if (renderBox != null) {
             final localPos = renderBox.globalToLocal(details.globalPosition);
-            _dragOffset = localPos - Offset(45, 55);
+            // We want the drag offset to be relative to the icon center roughly
+            // or keep the offset from where we grabbed it.
+            // Existing logic used a fixed offset (45, 55) which is half of 90x110.
+            _dragOffset = localPos - const Offset(45, 55);
+
+            // If we just started dragging, we might want to adjust the _initialItemPositions
+            // for the leader so it matches exactly where it visually is?
+            // Actually the existing logic replaces position with _dragOffset entirely for the leader.
+            // So for followers we need to know the delta.
+            // Delta = current_leader_pos - initial_leader_pos
+            // But wait, _dragOffset is the top-left of the icon.
+            // So we need to store the initial top-left of the leader.
+            // That is already done in the loop above.
           } else {
             _dragOffset = basePosition;
           }
@@ -812,26 +883,69 @@ cd "__WD__" && exec sh -lc "${SHELL:-bash}"
           existing = state.positions;
         }
 
-        // Check if dropped on another icon
-        if (_hoveredTargetPath != null && _hoveredTargetPath != path) {
-          bloc.add(
-            MoveFileEvent(sourcePath: path, targetPath: _hoveredTargetPath!),
-          );
-        } else {
-          // Normal grid snap
-          final target = _gridSystem.findNearestFreeSlot(
-              position, filename, existing);
-          final currentPos = existing[filename];
-          if (currentPos == null ||
-              (currentPos['x']! - target.dx).abs() > 0.1 ||
-              (currentPos['y']! - target.dy).abs() > 0.1) {
+        // 1. Check if dropped on another icon (folder/executable)
+        if (_hoveredTargetPath != null &&
+            !_selectedPaths.contains(_hoveredTargetPath)) {
+          // Move all selected items to target
+          for (final selectedPath in _selectedPaths) {
+            if (selectedPath == _hoveredTargetPath) continue;
             bloc.add(
-              UpdatePositionEvent(
-                filename: filename,
-                x: target.dx,
-                y: target.dy,
+              MoveFileEvent(
+                sourcePath: selectedPath,
+                targetPath: _hoveredTargetPath!,
               ),
             );
+          }
+        } else {
+          // 2. Normal grid snap for all selected items
+          // We need to calculate the final position for each item
+          // Delta calculation:
+          final leaderInitial = _initialItemPositions[path];
+          // If for some reason we don't have leader initial, abort or fallback
+          if (leaderInitial != null && _dragOffset != null) {
+            final dx = _dragOffset!.dx - leaderInitial.dx;
+            final dy = _dragOffset!.dy - leaderInitial.dy;
+            final delta = Offset(dx, dy);
+
+            // We should apply updates in a way that doesn't cause collisions if possible,
+            // but for now we just update all of them to their new snapped locations.
+            // We might want to update the 'existing' map locally as we go to help findNearestFreeSlot?
+            // findNearestFreeSlot uses 'existing' to avoid overlaps.
+            // If we move multiple items, we should ideally reserve their new spots.
+
+            // Let's make a temporary mutable copy of existing positions to track new slots
+            final Map<String, Map<String, double>> tempPositions =
+                Map<String, Map<String, double>>.from(existing);
+
+            for (final selectedPath in _selectedPaths) {
+              final initial = _initialItemPositions[selectedPath];
+              if (initial == null) continue;
+
+              final rawNewPos = initial + delta;
+              final fName = p.basename(selectedPath);
+
+              // Remove old position from temp so we don't collide with ourselves (conceptually)
+              // But findNearestFreeSlot checks against 'existing'.
+              // If we want to move a group, we should probably clear their old positions from the check
+              // or just rely on the fact that they are moving to (hopefully) empty space.
+
+              final target = _gridSystem.findNearestFreeSlot(
+                rawNewPos,
+                fName,
+                tempPositions,
+              );
+
+              // Update tempPositions so next item in selection respects this one
+              tempPositions[fName] = {'x': target.dx, 'y': target.dy};
+
+              bloc.add(
+                UpdatePositionEvent(
+                  filename: fName,
+                  x: target.dx,
+                  y: target.dy,
+                ),
+              );
+            }
           }
         }
 
@@ -839,6 +953,7 @@ cd "__WD__" && exec sh -lc "${SHELL:-bash}"
           _draggingPath = null;
           _dragOffset = null;
           _hoveredTargetPath = null;
+          _initialItemPositions.clear();
         });
       },
     );
