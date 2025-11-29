@@ -117,15 +117,11 @@ class _GlassContextMenuState extends State<GlassContextMenu> {
 
   Widget _buildMenu(List<ContextMenuItem> items, {bool isSubmenu = false}) {
     const double horizontalPadding = 14;
-    final Matrix4 transform = Matrix4.identity()
-      ..setEntry(3, 2, 0.0012)
-      ..rotateX(isSubmenu ? 0.02 : -0.05)
-      ..rotateY(isSubmenu ? -0.03 : 0.05);
 
     final menuBody = ClipRRect(
-      borderRadius: BorderRadius.circular(18),
+      borderRadius: BorderRadius.circular(16),
       child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 20, sigmaY: 24),
+        filter: ImageFilter.blur(sigmaX: 4, sigmaY: 5),
         child: Container(
           width: _menuWidth,
           padding: const EdgeInsets.symmetric(
@@ -135,13 +131,13 @@ class _GlassContextMenuState extends State<GlassContextMenu> {
           decoration: BoxDecoration(
             gradient: LinearGradient(
               colors: [
-                Colors.white.withOpacity(0.18),
-                const Color(0xFF0B0B0D).withOpacity(0.82),
+                const Color.fromARGB(18, 0, 0, 0),
+                const Color.fromARGB(59, 0, 0, 0),
               ],
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
             ),
-            borderRadius: BorderRadius.circular(18),
+            borderRadius: BorderRadius.circular(16),
             border: Border.all(color: Colors.white.withOpacity(0.18), width: 1),
             boxShadow: [
               BoxShadow(
@@ -160,7 +156,7 @@ class _GlassContextMenuState extends State<GlassContextMenu> {
           ),
           child: DecoratedBox(
             decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(14),
+              borderRadius: BorderRadius.circular(16),
               gradient: LinearGradient(
                 colors: [Colors.white.withOpacity(0.06), Colors.transparent],
                 begin: Alignment.topLeft,
@@ -186,11 +182,7 @@ class _GlassContextMenuState extends State<GlassContextMenu> {
           _scheduleSubmenuClose();
         }
       },
-      child: Transform(
-        alignment: Alignment.topLeft,
-        transform: transform,
-        child: menuBody,
-      ),
+      child: menuBody,
     );
   }
 
