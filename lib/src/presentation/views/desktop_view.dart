@@ -58,6 +58,10 @@ class _DesktopViewState extends State<DesktopView> {
 
   // For multi-drag
   final Map<String, Offset> _initialItemPositions = {};
+  double? _minDragX;
+  double? _maxDragX;
+  double? _minDragY;
+  double? _maxDragY;
 
   @override
   void initState() {
@@ -842,19 +846,51 @@ cd "__WD__" && exec sh -lc "${SHELL:-bash}"
               _stackKey.currentContext?.findRenderObject() as RenderBox?;
           if (renderBox != null) {
             final localPos = renderBox.globalToLocal(details.globalPosition);
-            // We want the drag offset to be relative to the icon center roughly
-            // or keep the offset from where we grabbed it.
-            // Existing logic used a fixed offset (45, 55) which is half of 90x110.
             _dragOffset = localPos - const Offset(45, 55);
 
-            // If we just started dragging, we might want to adjust the _initialItemPositions
-            // for the leader so it matches exactly where it visually is?
-            // Actually the existing logic replaces position with _dragOffset entirely for the leader.
-            // So for followers we need to know the delta.
-            // Delta = current_leader_pos - initial_leader_pos
-            // But wait, _dragOffset is the top-left of the icon.
-            // So we need to store the initial top-left of the leader.
-            // That is already done in the loop above.
+            // Calculate drag bounds to keep all items on screen
+            if (renderBox.hasSize) {
+              final size = renderBox.size;
+              final leaderInitial = _initialItemPositions[path] ?? basePosition;
+
+              double minX = -double.infinity;
+              double maxX = double.infinity;
+              double minY = -double.infinity;
+              double maxY = double.infinity;
+
+              for (final selectedPath in _selectedPaths) {
+                final initial = _initialItemPositions[selectedPath];
+                if (initial == null) continue;
+
+                // 0 <= itemX <= width - 90
+                // 0 <= itemY <= height - 110
+                // itemPos = initial + (leaderPos - leaderInitial)
+                // leaderPos = itemPos - initial + leaderInitial
+
+                // Min X: itemPos >= 0 => leaderPos >= leaderInitial - initial
+                final itemMinX = leaderInitial.dx - initial.dx;
+                if (itemMinX > minX) minX = itemMinX;
+
+                // Max X: itemPos <= width - 90 => leaderPos <= width - 90 - initial + leaderInitial
+                final itemMaxX =
+                    size.width - 90 - initial.dx + leaderInitial.dx;
+                if (itemMaxX < maxX) maxX = itemMaxX;
+
+                // Min Y
+                final itemMinY = leaderInitial.dy - initial.dy;
+                if (itemMinY > minY) minY = itemMinY;
+
+                // Max Y
+                final itemMaxY =
+                    size.height - 110 - initial.dy + leaderInitial.dy;
+                if (itemMaxY < maxY) maxY = itemMaxY;
+              }
+
+              _minDragX = minX;
+              _maxDragX = maxX;
+              _minDragY = minY;
+              _maxDragY = maxY;
+            }
           } else {
             _dragOffset = basePosition;
           }
@@ -866,7 +902,19 @@ cd "__WD__" && exec sh -lc "${SHELL:-bash}"
         if (renderBox != null) {
           final localPos = renderBox.globalToLocal(details.globalPosition);
           setState(() {
-            _dragOffset = localPos - Offset(45, 55);
+            var newOffset = localPos - const Offset(45, 55);
+
+            if (_minDragX != null &&
+                _maxDragX != null &&
+                _minDragY != null &&
+                _maxDragY != null) {
+              newOffset = Offset(
+                newOffset.dx.clamp(_minDragX!, _maxDragX!),
+                newOffset.dy.clamp(_minDragY!, _maxDragY!),
+              );
+            }
+
+            _dragOffset = newOffset;
             _hoveredTargetPath = _findIconAtPosition(
               localPos,
               widget.positions,
@@ -954,6 +1002,10 @@ cd "__WD__" && exec sh -lc "${SHELL:-bash}"
           _dragOffset = null;
           _hoveredTargetPath = null;
           _initialItemPositions.clear();
+          _minDragX = null;
+          _maxDragX = null;
+          _minDragY = null;
+          _maxDragY = null;
         });
       },
     );
