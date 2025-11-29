@@ -1,10 +1,6 @@
+/*مكتبه مهمه لنضام*/
+
+ apt install libmpv-dev  ffmpegthumbnailer
 
 
-
-
-
-
-
-
-
-مكتبه مهمه لنضام   apt install libmpv-dev gdk-pixbuf-thumbnailer ffmpegthumbnailer
+  cd ./themes/Nordzy-icon && \ ./install.sh -t default -c -p
